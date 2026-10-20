@@ -24,14 +24,16 @@ zero version and has no releases yet.
   `--selfCheck=true` which clears an offscreen image, copies it back through a host-visible buffer and compares every
   pixel against the clear colour within one byte.
 - Documentation: `README.md`, `docs/ENVIRONMENT.md`, `docs/ARCHITECTURE.md`, `docs/formats/CONTAINERS.md`,
-  `docs/EXISTING_PROJECT_AUDIT.md`, `docs/ROADMAP.md`.
+  `docs/EXISTING_PROJECT_AUDIT.md`, `docs/ROADMAP.md`, `docs/formats/DRM.md`.
 
 ### Verified
-
 - Container unit tests (12 passing through CTest): golden path hashes taken from the shipped archive
   (`pc-w\generalbank.drm` → `0xB3AAAFD6`, `pc-w\lara.drm` → `0x5FF91900`), synthetic stored/zlib/raw-deflate records,
   part-boundary straddling, specialisation-mask selection, unsorted-index rejection, strict typed getters, log level
   filtering.
+- `docs/formats/DRM.md`: the version-14 unit layout measured from six extracted units — header fields, the
+  v19-compatible 20-byte section directory (types, sizes, ids, spec masks), 8-byte relocation entries proven by landing
+  all 71 texture payloads of `lara.drm` on their magic while consuming the file exactly, and the unresolved regions.
 - Real install (`tra.exe` sha256 `b43ade0d922b0f007747e5707b97c86404cbf4f051829e3711f7007a656ea53a`, GOG build):
   4,304 records across 27 parts; hash table sorted; no record straddles a part boundary; every PC record stored
   uncompressed. Name recovery resolves 948 of the 949 object-list units as `pc-w\<name>.drm`. Extraction round trip:
