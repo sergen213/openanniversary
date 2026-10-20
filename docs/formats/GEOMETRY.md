@@ -275,3 +275,21 @@ payload kinds are unresolved; reading the executable's terrain loader is the way
 Coverage is open as well: these records index only 15,724 of 149,077 vertices, roughly a tenth of the array. Whatever
 draws the rest is unidentified - `vmoObjectIndex` and prior art's portal-adjust vertex arrays are the candidates
 **[INFERENCE]**.
+
+A second probe of the same question, over section 86's tree alone: parsing a record header exactly at each leaf addend
+(sane `vertexCount`, index run inside the payload, every index below the array size) passes for **50 of 533** leaves and
+fails for 451 **[V-data]**. The passing ones chain normally - target 183 addend 0 holds vc=384 matIdx=75 next=0x32C, which
+is another record start - so the form is right and only part of the tree's leaves reach it this way.
+
+## 11. Which per-type handler owns a terrain payload, measured [V]
+
+`FUN_005bd980` fills the handler table `DAT_0088e2b0 + type*4` (`GEOMETRY.md` §7 established the indexing): one heap cell
+per slot holding an object pointer - type 0, type 4 and type 10 all get `PTR_LAB_00657444`, type 1 `PTR_LAB_00657414`,
+type 2 `PTR_LAB_00657474`, type 5 the texture handler returned by `FUN_00403b30`, type 6 `FUN_005cbb80`, type 7
+`FUN_005bc830` (§7), type 9 `PTR_FUN_006574a4`; the two cells between them (`DAT_0088e2bc`, `DAT_0088e2d0`) are not set
+there **[V]**. So the section types a level unit uses for vertices, oct-tree and strips are served by one shared generic
+handler - there is no terrain-specific loader in that table, which is why those payloads look like plain byte arrays to our
+parser. The generic path itself shows in `FUN_005bca80`'s default branch: a record count at object +0x14, an allocation of
+`count * 0x14`, and a word-by-word copy over the payload in stride-20 steps **[V]**. Consequence for §10's open questions:
+leaf-to-record linkage is decided by game code after loading, so the next place to look is the terrain-group constructor
+among the callers of that generic handler, not the section dispatch itself.

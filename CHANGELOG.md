@@ -145,6 +145,14 @@ zero version and has no releases yet.
   another accepted record start inside the same payload, so that field is an absolute offset within a payload; the triangles
   are coherent at ~0.4% RMS. They index 15,724 of 149,077 vertices, and only 85 of 1,620 leaf addends land on a record
   start, so leaf-to-record linkage, the other payload kinds and the rest of the vertex array stay unresolved.
+- Per-type handler table named (`docs/formats/GEOMETRY.md` §11): `FUN_005bd980` fills `DAT_0088e2b0 + type*4` with one object
+  per section type - types 0, 4 and 10 share `PTR_LAB_00657444`, type 5 is the texture handler returned by `FUN_00403b30`,
+  type 7 `FUN_005bc830` - so a level unit's terrain payloads are loaded through one generic stride-20 object path
+  (`FUN_005bca80`'s default branch: count at +0x14, allocate `count * 0x14`, copy in stride-20 steps) and no terrain-specific
+  handler exists in that table; what a leaf reference means is decided by game code after loading.
+- Leaf-addend header probe over unit `8baf540e` section 86 (`docs/formats/GEOMETRY.md` §10): a record header parses cleanly at
+  only **50 of 533** leaf addends, and the ones that do parse chain normally (target 183, addend 0: vertexCount 384, matIdx 75,
+  nextTexture 0x32C), so the record form is confirmed while leaf-to-record linkage stays unresolved.
 
 ### Fixed
 
