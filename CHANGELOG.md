@@ -59,12 +59,23 @@ zero version and has no releases yet.
   are hexadecimal, like in `oa-asset`.
 - `VkRenderer::uploadTexture()` (staging buffer, one `vkCmdCopyBufferToImage` region per mip level, layout transition,
   combined-image-sampler descriptor) and `sampleInto()`, the offscreen draw-and-read-back helper the self-check uses.
+- `src/cdc/Geometry.*`: the unindexed triangle-run decoder (`decodeMesh`, `meshBounds`) for a general section's stride-20
+  vertex records - position i16x3, four modulate bytes, texture coordinates - with synthetic fixtures pinning every field.
+- `oa-game --mesh=<record path or eight-digit hash> [--section N] [--yaw/--pitch/--zoom]`: parses that record as a DRM unit,
+  picks the given section (or the largest stored type-0 one) and uploads its records verbatim; `shaders/mesh.vert` and
+  `mesh.frag` draw them depth-tested against themselves with an orbit camera passed as push constants. Colours are flat:
+  nothing in the archive ties the modulate bytes to an interpolation rule yet.
+- The window render pass now carries a depth attachment shared by both pipelines, and `sampleInto()` mirrors it with a
+  temporary depth image so every probe stays render-pass-compatible with the pipeline it draws. New
+  `VkRenderer::uploadMesh()`, `renderMeshOffscreen()` (headless geometry read-back) and `createMeshPipeline()`.
+- Six `Mesh.*` unit tests; `scripts/ci.sh` now also runs `--mesh` against a real install when `OA_GAME_DIR` is set
+  (`OA_MESH_RECORD` overrides the level unit).
 
 ### Verified
-- Container unit tests (12 passing through CTest): golden path hashes taken from the shipped archive
-  (`pc-w\generalbank.drm` → `0xB3AAAFD6`, `pc-w\lara.drm` → `0x5FF91900`), synthetic stored/zlib/raw-deflate records,
-  part-boundary straddling, specialisation-mask selection, unsorted-index rejection, strict typed getters, log level
-  filtering.
+- Container unit tests (through CTest; the suite is 33 cases today, these among them): golden path hashes taken from the
+  shipped archive (`pc-w\generalbank.drm` → `0xB3AAAFD6`, `pc-w\lara.drm` → `0x5FF91900`), synthetic stored/zlib/
+  raw-deflate records, part-boundary straddling, specialisation-mask selection, unsorted-index rejection, strict typed
+  getters, log level filtering.
 - `docs/formats/DRM.md`: the version-14 unit layout measured from six extracted units — header fields, the
   v19-compatible 20-byte section directory (types, sizes, ids, spec masks), 8-byte relocation entries proven by landing
   all 71 texture payloads of `lara.drm` on their magic while consuming the file exactly, and the unresolved regions.
@@ -88,9 +99,9 @@ zero version and has no releases yet.
   desktop panel. With validation enabled the only reported messages are the host's
   stale `liblsfg-vk-layer.so` loader entries described in `docs/ENVIRONMENT.md`.
 
-- `scripts/ci.sh` executed end-to-end here: plain suite 12/12; renderer smoke on Wayland with the RX 7900 XTX reported
-  "self-check passed" and presented 3 frames; ASan+UBSan suite 12/12. Under Xvfb without DRI3 the same step exits 77 as a
-  documented skip rather than failing.
+- `scripts/ci.sh` executed end-to-end here (with `OA_GAME_DIR` pointing at the real install): plain suite 33/33; renderer
+  smoke on Wayland with the RX 7900 XTX reported both self-check phases, drew one shipped triangle run and presented 3
+  frames; ASan+UBSan suite 33/33. Under Xvfb without DRI3 the same step exits 77 as a documented skip rather than failing.
 - Real GPU texture path with shipped bytes only (`pc-w\lara.drm` section 0: 512x512 DXT1, 10 levels, 174,776 payload
   bytes): `oa-game --gameDir=... --texture='pc-w\lara.drm' --selfCheck=false` logs
   `uploaded 512x512 texture: format=134 levels=10 bytes=174776`, and a desktop grab during that run shows Lara's clothing
@@ -102,6 +113,14 @@ zero version and has no releases yet.
   within one unit (`self-check passed: sampled 16x16 texture matches the uploaded texels`). Phase one keeps its plain
   `R8G8B8A8_UNORM` image so clear floats stay linear. Validation reports nothing beyond the host's stale loader entries,
   and no object leaks at teardown.
+- Shipped geometry on the GPU, container to pixels (`docs/formats/GEOMETRY.md` §6): `oa-game --gameDir=...
+  --mesh=8baf540e --selfCheck=true` logs `drawing section 0 of '8baf540e' (id 0, type 0): 149077 vertices, 49692
+  triangles, bounds 55103x55225x50366 world units` — the vertex count is exactly that section's 2,981,540 payload bytes
+  over 20 — and `mesh probe: 6768/9216 pixels covered by 12829 distinct vertex colours, 0 unexplained`, i.e. every lit
+  pixel of the offscreen read-back equals one shipped colour byte within an sRGB step. A desktop capture of a 900x600
+  window during that run shows the level silhouette with facet colours and depth occlusion; it is evidence of shape, not
+  of bytes, because this session's compositor remaps window pixels (no window pixel equalled a shipped byte exactly).
+  Validation reports nothing beyond the host's stale loader entries [V-gpu].
 
 ### Fixed
 

@@ -4,6 +4,8 @@
 #include <SDL3/SDL_vulkan.h>
 
 #include <algorithm>
+#include <cmath>
+
 #include <cstring>
 #include <filesystem>
 
@@ -17,6 +19,10 @@ constexpr VkFormat kSelfCheckFormat = VK_FORMAT_B8G8R8A8_SRGB;
 // Phase one clears and reads back a bare image with no pipeline involved, so it keeps a plain UNORM format whose
 // stored bytes are the clear floats times 255.
 constexpr VkFormat kClearCheckFormat = VK_FORMAT_R8G8B8A8_UNORM;
+// Depth for the level's triangle runs. D32_SFLOAT is the one depth format every desktop driver offers, and no
+// stencil is read yet.
+constexpr VkFormat kDepthFormat = VK_FORMAT_D32_SFLOAT;
+
 
 // SPIR-V words of a compiled shader module. The build compiles shaders/ to build/shaders (CMake rule), so the
 // repository stores GLSL and the loader only has to read 32-bit words.
@@ -118,6 +124,8 @@ bool VkRenderer::init(platform::Window& window, const RendererConfig& config, st
     if (!createSwapchain(window.widthPixels(), window.heightPixels(), error)) return false;
     if (!createRenderTargets(error)) return false;
     if (!createPipeline(error)) return false;
+    if (!createMeshPipeline(error)) return false;
+
     return true;
 }
 
@@ -358,10 +366,25 @@ bool VkRenderer::createRenderTargets(std::string* error) {
     color.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;  // the render pass ends in the layout presentation wants
 
     VkAttachmentReference colorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    // Depth belongs to the pass rather than to one pipeline: a triangle run has to sort against itself instead of
+    // drawing in archive order. The textured quad still declares depth off, so it is unaffected.
+    VkAttachmentDescription depth{};
+    depth.format = kDepthFormat;
+    depth.samples = VK_SAMPLE_COUNT_1_BIT;
+    depth.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    depth.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depth.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    depth.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depth.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    depth.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    const VkAttachmentDescription attachments[2] = {color, depth};
+
     VkSubpassDescription subpass{};
     subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     subpass.colorAttachmentCount = 1;
     subpass.pColorAttachments = &colorRef;
+    const VkAttachmentReference depthRef{1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+    subpass.pDepthStencilAttachment = &depthRef;
 
     VkSubpassDependency dependency{};
     dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
@@ -371,8 +394,8 @@ bool VkRenderer::createRenderTargets(std::string* error) {
     dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
 
     VkRenderPassCreateInfo passInfo{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
-    passInfo.attachmentCount = 1;
-    passInfo.pAttachments = &color;
+    passInfo.attachmentCount = 2;
+    passInfo.pAttachments = attachments;
     passInfo.subpassCount = 1;
     passInfo.pSubpasses = &subpass;
     passInfo.dependencyCount = 1;
@@ -380,6 +403,8 @@ bool VkRenderer::createRenderTargets(std::string* error) {
     if (!check(vkCreateRenderPass(device_, &passInfo, nullptr, &renderPass_), "vkCreateRenderPass", error)) {
         return false;
     }
+
+    if (!createDepthImage(error)) return false;
 
     for (SwapchainImage& target : images_) {
         VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
@@ -390,10 +415,13 @@ bool VkRenderer::createRenderTargets(std::string* error) {
         if (!check(vkCreateImageView(device_, &viewInfo, nullptr, &target.view), "vkCreateImageView", error)) {
             return false;
         }
+        // Both attachments of the pass have to be present, so every swapchain image pairs with the shared depth
+        // buffer (recreated with the extent, exactly like the images themselves).
+        const VkImageView views[2] = {target.view, depthView_};
         VkFramebufferCreateInfo fbInfo{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
         fbInfo.renderPass = renderPass_;
-        fbInfo.attachmentCount = 1;
-        fbInfo.pAttachments = &target.view;
+        fbInfo.attachmentCount = 2;
+        fbInfo.pAttachments = views;
         fbInfo.width = extent_.width;
         fbInfo.height = extent_.height;
         fbInfo.layers = 1;
@@ -434,6 +462,8 @@ void VkRenderer::destroySwapchain(bool waitForIdle) {
         vkDestroyRenderPass(device_, renderPass_, nullptr);
         renderPass_ = VK_NULL_HANDLE;
     }
+    destroyDepthImage();
+
     for (VkFence& fence : frameFences_) {
         if (fence != VK_NULL_HANDLE) vkDestroyFence(device_, fence, nullptr);
     }
@@ -459,6 +489,8 @@ bool VkRenderer::renderFrame(std::string* error) {
         if (!createRenderTargets(error)) return false;
         // The pipeline is tied to the render pass it was built against, so it has to come back with its swapchain.
         if (!createPipeline(error)) return false;
+        if (!createMeshPipeline(error)) return false;
+
     }
     if (images_.empty()) return false;
 
@@ -481,16 +513,32 @@ bool VkRenderer::renderFrame(std::string* error) {
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     if (!check(vkBeginCommandBuffer(command, &begin), "vkBeginCommandBuffer", error)) return false;
 
-    VkClearValue clear{};
-    clear.color = VkClearColorValue{{config_.clearColour[0], config_.clearColour[1], config_.clearColour[2],
-                                     config_.clearColour[3]}};
+    VkClearValue clears[2]{};
+    clears[0].color = VkClearColorValue{{config_.clearColour[0], config_.clearColour[1], config_.clearColour[2],
+                                         config_.clearColour[3]}};
+    clears[1].depthStencil = VkClearDepthStencilValue{1.0f, 0u};
     VkRenderPassBeginInfo passBegin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     passBegin.renderPass = renderPass_;
     passBegin.framebuffer = images_[imageIndex].framebuffer;
     passBegin.renderArea = VkRect2D{{0, 0}, extent_};
-    passBegin.clearValueCount = 1;
-    passBegin.pClearValues = &clear;
+    passBegin.clearValueCount = 2;
+    passBegin.pClearValues = clears;
     vkCmdBeginRenderPass(command, &passBegin, VK_SUBPASS_CONTENTS_INLINE);
+    // The level goes down before the textured quad so an overlay still reads on top of it. Viewport and scissor are
+    // dynamic state, so each branch states them instead of depending on the other having run.
+    if (meshVertexCount_ != 0 && meshPipeline_ != VK_NULL_HANDLE) {
+        const VkViewport viewport{0.0f, 0.0f, static_cast<float>(extent_.width), static_cast<float>(extent_.height),
+                                  0.0f, 1.0f};
+        vkCmdSetViewport(command, 0, 1, &viewport);
+        const VkRect2D scissor{{0, 0}, extent_};
+        vkCmdSetScissor(command, 0, 1, &scissor);
+        vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, meshPipeline_);
+        const VkDeviceSize vertexOffset = 0;
+        vkCmdBindVertexBuffers(command, 0, 1, &meshBuffer_, &vertexOffset);
+        pushMeshMatrix(command);
+        vkCmdDraw(command, meshVertexCount_, 1, 0, 0);
+    }
+
     if (texture_ != VK_NULL_HANDLE && pipeline_ != VK_NULL_HANDLE) {
         const VkViewport viewport{0.0f, 0.0f, static_cast<float>(extent_.width), static_cast<float>(extent_.height),
                                   0.0f, 1.0f};
@@ -995,6 +1043,8 @@ void VkRenderer::destroyPipeline() {
         vkDestroyPipelineLayout(device_, pipelineLayout_, nullptr);
     }
     pipelineLayout_ = VK_NULL_HANDLE;
+    // The mesh pipeline is built against the same render pass, so it leaves and returns with this one.
+    destroyMeshPipeline();
 }
 
 void VkRenderer::destroyTexture() {
@@ -1239,9 +1289,64 @@ bool VkRenderer::uploadTexture(const TextureUpload& texture, std::string* error)
 // kSelfCheckFormat, because that is what this pass declares and the pipeline it draws with was built for that format.
 // upload → descriptor → pipeline → blend through real command submission, without a window in sight.
 bool VkRenderer::sampleInto(VkImage colourAttachment, VkExtent2D size, std::vector<std::byte>* outRgba,
-                            std::string* error) {
-    if (outRgba == nullptr || pipeline_ == VK_NULL_HANDLE || descriptorSet_ == VK_NULL_HANDLE) {
+                            std::string* error, bool drawMesh) {
+    if (outRgba == nullptr) return false;
+    if (!drawMesh && (pipeline_ == VK_NULL_HANDLE || descriptorSet_ == VK_NULL_HANDLE)) {
         if (error != nullptr) *error = "sampleInto needs a pipeline and an uploaded texture";
+        return false;
+    }
+    if (drawMesh && (meshPipeline_ == VK_NULL_HANDLE || meshVertexCount_ == 0)) {
+        if (error != nullptr) *error = "sampleInto(drawMesh) needs an uploaded triangle run";
+        return false;
+    }
+
+    // The probe pass has to be render-pass compatible with whatever pipeline it draws, and both of those were built
+    // against the window pass, which carries a depth attachment. So the probe always pairs its colour attachment with
+    // a temporary depth image; a textured quad ignores that (depth test off), and the byte-for-byte comparison of
+    // texels is unaffected because nothing here writes to the colour attachment but the shader.
+    VkImage probeDepth = VK_NULL_HANDLE;
+    VkDeviceMemory probeDepthMemory = VK_NULL_HANDLE;
+    VkImageView probeDepthView = VK_NULL_HANDLE;
+    const auto releaseDepthProbe = [&]() {
+        if (probeDepthView != VK_NULL_HANDLE) vkDestroyImageView(device_, probeDepthView, nullptr);
+        if (probeDepthMemory != VK_NULL_HANDLE) vkFreeMemory(device_, probeDepthMemory, nullptr);
+        if (probeDepth != VK_NULL_HANDLE) vkDestroyImage(device_, probeDepth, nullptr);
+    };
+    VkImageCreateInfo depthInfo{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    depthInfo.imageType = VK_IMAGE_TYPE_2D;
+    depthInfo.format = kDepthFormat;
+    depthInfo.extent = VkExtent3D{size.width, size.height, 1};
+    depthInfo.mipLevels = 1;
+    depthInfo.arrayLayers = 1;
+    depthInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    depthInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    depthInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    depthInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (!check(vkCreateImage(device_, &depthInfo, nullptr, &probeDepth), "sampleInto depth vkCreateImage", error)) {
+        return false;
+    }
+    VkMemoryRequirements depthRequirements{};
+    vkGetImageMemoryRequirements(device_, probeDepth, &depthRequirements);
+    const uint32_t depthType =
+        findMemoryType(physical_, depthRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    VkMemoryAllocateInfo depthAllocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    depthAllocate.allocationSize = depthRequirements.size;
+    depthAllocate.memoryTypeIndex = depthType == 0xFFFFFFFFu ? 0 : depthType;
+    if (!check(vkAllocateMemory(device_, &depthAllocate, nullptr, &probeDepthMemory), "sampleInto depth memory", error)) {
+        releaseDepthProbe();
+        return false;
+    }
+    if (!check(vkBindImageMemory(device_, probeDepth, probeDepthMemory, 0), "sampleInto depth bind", error)) {
+        releaseDepthProbe();
+        return false;
+    }
+    VkImageViewCreateInfo depthViewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    depthViewInfo.image = probeDepth;
+    depthViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    depthViewInfo.format = kDepthFormat;
+    depthViewInfo.subresourceRange = VkImageSubresourceRange{VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+    if (!check(vkCreateImageView(device_, &depthViewInfo, nullptr, &probeDepthView), "sampleInto depth view", error)) {
+        releaseDepthProbe();
         return false;
     }
 
@@ -1256,10 +1361,22 @@ bool VkRenderer::sampleInto(VkImage colourAttachment, VkExtent2D size, std::vect
     // The pass hands the image straight to the copy-out layout, so no extra barrier is needed here.
     attachment.finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     const VkAttachmentReference colorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    const VkAttachmentReference depthRef{1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+    VkAttachmentDescription depth{};
+    depth.format = kDepthFormat;
+    depth.samples = VK_SAMPLE_COUNT_1_BIT;
+    depth.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    depth.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depth.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    depth.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depth.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    depth.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    const VkAttachmentDescription attachments[2] = {attachment, depth};
     VkSubpassDescription subpass{};
     subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     subpass.colorAttachmentCount = 1;
     subpass.pColorAttachments = &colorRef;
+    subpass.pDepthStencilAttachment = &depthRef;
     const VkSubpassDependency dependency{VK_SUBPASS_EXTERNAL,
                                          0,
                                          VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -1267,8 +1384,8 @@ bool VkRenderer::sampleInto(VkImage colourAttachment, VkExtent2D size, std::vect
                                          0,
                                          VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT};
     VkRenderPassCreateInfo passInfo{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
-    passInfo.attachmentCount = 1;
-    passInfo.pAttachments = &attachment;
+    passInfo.attachmentCount = 2;
+    passInfo.pAttachments = attachments;
     passInfo.subpassCount = 1;
     passInfo.pSubpasses = &subpass;
     passInfo.dependencyCount = 1;
@@ -1288,6 +1405,7 @@ bool VkRenderer::sampleInto(VkImage colourAttachment, VkExtent2D size, std::vect
         if (framebuffer != VK_NULL_HANDLE) vkDestroyFramebuffer(device_, framebuffer, nullptr);
         if (view != VK_NULL_HANDLE) vkDestroyImageView(device_, view, nullptr);
         if (pass != VK_NULL_HANDLE) vkDestroyRenderPass(device_, pass, nullptr);
+        releaseDepthProbe();
     };
 
     VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
@@ -1299,10 +1417,12 @@ bool VkRenderer::sampleInto(VkImage colourAttachment, VkExtent2D size, std::vect
         release();
         return false;
     }
+    // Both attachments the pass declares have to be present in the framebuffer.
+    const VkImageView views[2] = {view, probeDepthView};
     VkFramebufferCreateInfo framebufferInfo{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
     framebufferInfo.renderPass = pass;
-    framebufferInfo.attachmentCount = 1;
-    framebufferInfo.pAttachments = &view;
+    framebufferInfo.attachmentCount = 2;
+    framebufferInfo.pAttachments = views;
     framebufferInfo.width = size.width;
     framebufferInfo.height = size.height;
     framebufferInfo.layers = 1;
@@ -1356,28 +1476,37 @@ bool VkRenderer::sampleInto(VkImage colourAttachment, VkExtent2D size, std::vect
     }
     // Transparent clear: the blend is premultiplied-source-over, so what arrives in the attachment is exactly what
     // the shader produced.
-    const VkClearValue clear{VkClearColorValue{{0.0f, 0.0f, 0.0f, 0.0f}}};
+    VkClearValue clears[2]{};
+    clears[0].color = VkClearColorValue{{0.0f, 0.0f, 0.0f, 0.0f}};
+    clears[1].depthStencil = VkClearDepthStencilValue{1.0f, 0u};
     VkRenderPassBeginInfo passBegin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     passBegin.renderPass = pass;
     passBegin.framebuffer = framebuffer;
     passBegin.renderArea = VkRect2D{{0, 0}, size};
-    passBegin.clearValueCount = 1;
-    passBegin.pClearValues = &clear;
+    passBegin.clearValueCount = 2;
+    passBegin.pClearValues = clears;
     vkCmdBeginRenderPass(command, &passBegin, VK_SUBPASS_CONTENTS_INLINE);
     const VkViewport viewport{0.0f, 0.0f, static_cast<float>(size.width), static_cast<float>(size.height), 0.0f, 1.0f};
     vkCmdSetViewport(command, 0, 1, &viewport);
     const VkRect2D scissor{{0, 0}, size};
     vkCmdSetScissor(command, 0, 1, &scissor);
-    vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
     const VkDeviceSize vertexOffset = 0;
-    vkCmdBindVertexBuffers(command, 0, 1, &vertexBuffer_, &vertexOffset);
-    vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, 1, &descriptorSet_, 0,
-                            nullptr);
-    const struct {
-        float scale[2];
-    } push{{1.0f, 1.0f}};
-    vkCmdPushConstants(command, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), &push);
-    vkCmdDraw(command, 6, 1, 0, 0);
+    if (drawMesh) {
+        vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, meshPipeline_);
+        vkCmdBindVertexBuffers(command, 0, 1, &meshBuffer_, &vertexOffset);
+        pushMeshMatrix(command);
+        vkCmdDraw(command, meshVertexCount_, 1, 0, 0);
+    } else {
+        vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
+        vkCmdBindVertexBuffers(command, 0, 1, &vertexBuffer_, &vertexOffset);
+        vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, 1, &descriptorSet_, 0,
+                                nullptr);
+        const struct {
+            float scale[2];
+        } push{{1.0f, 1.0f}};
+        vkCmdPushConstants(command, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), &push);
+        vkCmdDraw(command, 6, 1, 0, 0);
+    }
     vkCmdEndRenderPass(command);
     const VkBufferImageCopy region{0,
                                    0,
@@ -1419,6 +1548,310 @@ bool VkRenderer::sampleInto(VkImage colourAttachment, VkExtent2D size, std::vect
     return true;
 }
 
+bool VkRenderer::createDepthImage(std::string* error) {
+    if (depthImage_ != VK_NULL_HANDLE) return true;   // survives nothing: it is sized with the extent below
+    VkImageCreateInfo imageInfo{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    imageInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageInfo.format = kDepthFormat;
+    imageInfo.extent = VkExtent3D{extent_.width, extent_.height, 1};
+    imageInfo.mipLevels = 1;
+    imageInfo.arrayLayers = 1;
+    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (!check(vkCreateImage(device_, &imageInfo, nullptr, &depthImage_), "depth vkCreateImage", error)) {
+        return false;
+    }
+    VkMemoryRequirements requirements{};
+    vkGetImageMemoryRequirements(device_, depthImage_, &requirements);
+    const uint32_t deviceLocal =
+        findMemoryType(physical_, requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    allocate.allocationSize = requirements.size;
+    allocate.memoryTypeIndex = deviceLocal == 0xFFFFFFFFu ? 0 : deviceLocal;
+    if (!check(vkAllocateMemory(device_, &allocate, nullptr, &depthMemory_), "depth vkAllocateMemory", error)) {
+        return false;
+    }
+    if (!check(vkBindImageMemory(device_, depthImage_, depthMemory_, 0), "depth vkBindImageMemory", error)) {
+        return false;
+    }
+    VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    viewInfo.image = depthImage_;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format = kDepthFormat;
+    viewInfo.subresourceRange = VkImageSubresourceRange{VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+    return check(vkCreateImageView(device_, &viewInfo, nullptr, &depthView_), "depth vkCreateImageView", error);
+}
+
+void VkRenderer::destroyDepthImage() {
+    if (device_ == VK_NULL_HANDLE) return;
+    if (depthView_ != VK_NULL_HANDLE) vkDestroyImageView(device_, depthView_, nullptr);
+    if (depthMemory_ != VK_NULL_HANDLE) vkFreeMemory(device_, depthMemory_, nullptr);
+    if (depthImage_ != VK_NULL_HANDLE) vkDestroyImage(device_, depthImage_, nullptr);
+    depthView_ = VK_NULL_HANDLE;
+    depthMemory_ = VK_NULL_HANDLE;
+    depthImage_ = VK_NULL_HANDLE;
+}
+
+bool VkRenderer::createMeshPipeline(std::string* error) {
+    if (meshPipeline_ != VK_NULL_HANDLE) return true;   // the layout survives swapchain recreation
+
+    const std::vector<std::uint32_t> vert = readSpv(std::filesystem::path(config_.shaderDirectory) / "mesh.vert.spv",
+                                                    error);
+    if (vert.empty()) return false;
+    const std::vector<std::uint32_t> frag = readSpv(std::filesystem::path(config_.shaderDirectory) / "mesh.frag.spv",
+                                                    error);
+    if (frag.empty()) return false;
+
+    VkShaderModuleCreateInfo vertInfo{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    vertInfo.codeSize = vert.size() * 4u;
+    vertInfo.pCode = vert.data();
+    VkShaderModule vertModule = VK_NULL_HANDLE;
+    if (!check(vkCreateShaderModule(device_, &vertInfo, nullptr, &vertModule), "vkCreateShaderModule mesh vertex",
+               error)) {
+        return false;
+    }
+    VkShaderModuleCreateInfo fragInfo{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    fragInfo.codeSize = frag.size() * 4u;
+    fragInfo.pCode = frag.data();
+    VkShaderModule fragModule = VK_NULL_HANDLE;
+    if (!check(vkCreateShaderModule(device_, &fragInfo, nullptr, &fragModule), "vkCreateShaderModule mesh fragment",
+               error)) {
+        vkDestroyShaderModule(device_, vertModule, nullptr);
+        return false;
+    }
+
+    // The whole interface is one 4x4 matrix: no descriptor set, so this layout belongs to the mesh pipeline alone.
+    const VkPushConstantRange pushRange{VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(float) * 16u};
+    VkPipelineLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    layoutInfo.pushConstantRangeCount = 1;
+    layoutInfo.pPushConstantRanges = &pushRange;
+    if (!check(vkCreatePipelineLayout(device_, &layoutInfo, nullptr, &meshLayout_), "vkCreatePipelineLayout mesh",
+               error)) {
+        vkDestroyShaderModule(device_, vertModule, nullptr);
+        vkDestroyShaderModule(device_, fragModule, nullptr);
+        return false;
+    }
+
+    const VkPipelineShaderStageCreateInfo stages[2] = {
+        VkPipelineShaderStageCreateInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0,
+                                        VK_SHADER_STAGE_VERTEX_BIT, vertModule, "main", nullptr},
+        VkPipelineShaderStageCreateInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0,
+                                        VK_SHADER_STAGE_FRAGMENT_BIT, fragModule, "main", nullptr},
+    };
+    // The record layout the archive stores (docs/formats/GEOMETRY.md §2): position i16x3 at +0, four colour bytes at
+    // +8. Kept here rather than pulled from the parser header so oa_render stays independent of oa_cdc.
+    constexpr std::size_t kRecordBytes = 20;
+    const VkVertexInputBindingDescription binding{0, static_cast<std::uint32_t>(kRecordBytes),
+                                                  VK_VERTEX_INPUT_RATE_VERTEX};
+    const VkVertexInputAttributeDescription attributes[2] = {
+        VkVertexInputAttributeDescription{0, 0, VK_FORMAT_R16G16B16_SINT, 0},
+        VkVertexInputAttributeDescription{1, 0, VK_FORMAT_R8G8B8A8_UNORM, 8},
+    };
+    VkPipelineVertexInputStateCreateInfo vertexInput{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    vertexInput.vertexBindingDescriptionCount = 1;
+    vertexInput.pVertexBindingDescriptions = &binding;
+    vertexInput.vertexAttributeDescriptionCount = 2;
+    vertexInput.pVertexAttributeDescriptions = attributes;
+
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    const VkDynamicState dynamicStates[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineViewportStateCreateInfo viewportState{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+    viewportState.viewportCount = 1;
+    viewportState.scissorCount = 1;
+    VkPipelineDynamicStateCreateInfo dynamicState{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+    dynamicState.dynamicStateCount = 2;
+    dynamicState.pDynamicStates = dynamicStates;
+
+    VkPipelineRasterizationStateCreateInfo rasterizer{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterizer.lineWidth = 1.0f;
+    // Winding has not been established from the archive yet, so nothing may be culled: a wrong guess would delete
+    // half of every level rather than expose the order.
+    rasterizer.cullMode = VK_CULL_MODE_NONE;
+    rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+
+    VkPipelineMultisampleStateCreateInfo multisample{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineDepthStencilStateCreateInfo depthStencil{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    depthStencil.depthTestEnable = VK_TRUE;
+    depthStencil.depthWriteEnable = VK_TRUE;
+    depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
+
+    // Vertex colours are written straight through: the shipped modulate colour is already display-encoded and the
+    // attachment re-encodes it, so no blend state is wanted here.
+    VkPipelineColorBlendAttachmentState blend{};
+    blend.blendEnable = VK_FALSE;
+    blend.colorWriteMask = 0xFu;
+    VkPipelineColorBlendStateCreateInfo colorBlend{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+    colorBlend.attachmentCount = 1;
+    colorBlend.pAttachments = &blend;
+
+    VkGraphicsPipelineCreateInfo pipelineInfo{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    pipelineInfo.stageCount = 2;
+    pipelineInfo.pStages = stages;
+    pipelineInfo.pVertexInputState = &vertexInput;
+    pipelineInfo.pDynamicState = &dynamicState;
+    pipelineInfo.pInputAssemblyState = &inputAssembly;
+    pipelineInfo.pViewportState = &viewportState;
+    pipelineInfo.pRasterizationState = &rasterizer;
+    pipelineInfo.pMultisampleState = &multisample;
+    pipelineInfo.pDepthStencilState = &depthStencil;
+    pipelineInfo.pColorBlendState = &colorBlend;
+    pipelineInfo.layout = meshLayout_;
+    pipelineInfo.renderPass = renderPass_;
+    pipelineInfo.subpass = 0;
+    const bool built = check(vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr,
+                                                       &meshPipeline_),
+                             "vkCreateGraphicsPipelines mesh", error);
+    vkDestroyShaderModule(device_, vertModule, nullptr);
+    vkDestroyShaderModule(device_, fragModule, nullptr);
+    if (!built) return false;
+
+    OA_LOG(LogLevel::Info, "vk", "graphics pipeline ready: triangle runs with vertex colours, depth-tested");
+    return true;
+}
+
+void VkRenderer::destroyMeshPipeline() {
+    if (meshPipeline_ != VK_NULL_HANDLE && device_ != VK_NULL_HANDLE) vkDestroyPipeline(device_, meshPipeline_, nullptr);
+    meshPipeline_ = VK_NULL_HANDLE;
+    if (meshLayout_ != VK_NULL_HANDLE && device_ != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(device_, meshLayout_, nullptr);
+    }
+    meshLayout_ = VK_NULL_HANDLE;
+}
+
+bool VkRenderer::uploadMesh(const MeshUpload& mesh, std::string* error) {
+    if (device_ == VK_NULL_HANDLE) {
+        if (error != nullptr) *error = "renderer not initialised";
+        return false;
+    }
+    if (mesh.bytes == nullptr || mesh.vertexCount < 3u) {
+        if (error != nullptr) *error = "a triangle run needs at least three vertices";
+        return false;
+    }
+    constexpr std::size_t kRecordBytes = 20;   // docs/formats/GEOMETRY.md §2
+    const std::size_t bytes = kRecordBytes * static_cast<std::size_t>(mesh.vertexCount);
+
+    if (meshMemory_ != VK_NULL_HANDLE) vkFreeMemory(device_, meshMemory_, nullptr);
+    if (meshBuffer_ != VK_NULL_HANDLE) vkDestroyBuffer(device_, meshBuffer_, nullptr);
+    meshMemory_ = VK_NULL_HANDLE;
+    meshBuffer_ = VK_NULL_HANDLE;
+    meshVertexCount_ = 0;
+
+    VkBufferCreateInfo bufferInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bufferInfo.size = bytes;
+    bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (!check(vkCreateBuffer(device_, &bufferInfo, nullptr, &meshBuffer_), "mesh vkCreateBuffer", error)) {
+        return false;
+    }
+    VkMemoryRequirements requirements{};
+    vkGetBufferMemoryRequirements(device_, meshBuffer_, &requirements);
+    const uint32_t hostVisible = findMemoryType(physical_, requirements.memoryTypeBits,
+                                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                                    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    allocate.allocationSize = requirements.size;
+    allocate.memoryTypeIndex = hostVisible == 0xFFFFFFFFu ? 0 : hostVisible;
+    if (!check(vkAllocateMemory(device_, &allocate, nullptr, &meshMemory_), "mesh vkAllocateMemory", error)) {
+        return false;
+    }
+    if (!check(vkBindBufferMemory(device_, meshBuffer_, meshMemory_, 0), "mesh vkBindBufferMemory", error)) {
+        return false;
+    }
+    void* mapped = nullptr;
+    if (!check(vkMapMemory(device_, meshMemory_, 0, VK_WHOLE_SIZE, 0, &mapped), "mesh vkMapMemory", error)) {
+        return false;
+    }
+    std::memcpy(mapped, mesh.bytes, bytes);
+    vkUnmapMemory(device_, meshMemory_);
+
+    // The camera fits itself to these, so the archive's own numbers are what decide how big the level looks.
+    for (int axis = 0; axis < 3; ++axis) {
+        meshCentre_[axis] = 0.5f * (mesh.boundsMin[axis] + mesh.boundsMax[axis]);
+        const float half = 0.5f * (mesh.boundsMax[axis] - mesh.boundsMin[axis]);
+        meshRadius_ = axis == 0 ? half : std::max(meshRadius_, half);
+    }
+    if (!(meshRadius_ > 1e-3f)) meshRadius_ = 1.0f;   // a flat or point-like run still needs a finite scale
+    meshVertexCount_ = mesh.vertexCount;
+    if (error != nullptr) error->clear();
+    return true;
+}
+
+void VkRenderer::pushMeshMatrix(VkCommandBuffer command) const {
+    // World to view: yaw about Z? The archive stores levels in its own axis convention, and which way is up has not
+    // been established from the executable yet [INFERENCE], so the camera orbits and lets the picture say.
+    const float cy = std::cos(camera_.yaw);
+    const float sy = std::sin(camera_.yaw);
+    const float cp = std::cos(camera_.pitch);
+    const float sp = std::sin(camera_.pitch);
+    // A = Rx(pitch) * Ry(yaw), rows of the world-to-view rotation.
+    const float a[3][3] = {{cy, 0.0f, sy}, {sp * sy, cp, -sp * cy}, {-cp * sy, sp, cp * cy}};
+    // Uniform scale keeps proportions; y flips because clip space has its origin at the top left in Vulkan, and z is
+    // halved into the [0,1] depth range the attachment uses.
+    const float s = camera_.zoom / meshRadius_;
+    const float rowScale[3] = {s, -s, 0.5f * s};
+    float matrix[16]{};
+    for (int column = 0; column < 3; ++column) {
+        for (int row = 0; row < 3; ++row) matrix[column * 4 + row] = rowScale[row] * a[row][column];
+    }
+    for (int row = 0; row < 3; ++row) {
+        float sum = 0.0f;
+        for (int column = 0; column < 3; ++column) sum -= matrix[column * 4 + row] * meshCentre_[column];
+        matrix[12 + row] = sum + (row == 2 ? 0.5f : 0.0f);
+    }
+    matrix[15] = 1.0f;
+    vkCmdPushConstants(command, meshLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(matrix), matrix);
+}
+
+bool VkRenderer::renderMeshOffscreen(std::vector<std::byte>* outRgba, uint32_t size, std::string* error) {
+    if (device_ == VK_NULL_HANDLE || meshVertexCount_ == 0) {
+        if (error != nullptr) *error = "renderMeshOffscreen needs an initialised renderer and an uploaded mesh";
+        return false;
+    }
+    // The attachment starts undefined: the pass redefines it, so no barrier is needed before recording.
+    VkImageCreateInfo imageInfo{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    imageInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageInfo.format = kSelfCheckFormat;
+    imageInfo.extent = VkExtent3D{size, size, 1};
+    imageInfo.mipLevels = 1;
+    imageInfo.arrayLayers = 1;
+    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkImage attachment = VK_NULL_HANDLE;
+    if (!check(vkCreateImage(device_, &imageInfo, nullptr, &attachment), "mesh offscreen vkCreateImage", error)) {
+        return false;
+    }
+    VkMemoryRequirements requirements{};
+    vkGetImageMemoryRequirements(device_, attachment, &requirements);
+    const uint32_t deviceLocal =
+        findMemoryType(physical_, requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    allocate.allocationSize = requirements.size;
+    allocate.memoryTypeIndex = deviceLocal == 0xFFFFFFFFu ? 0 : deviceLocal;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    if (!check(vkAllocateMemory(device_, &allocate, nullptr, &memory), "mesh offscreen vkAllocateMemory", error)) {
+        vkDestroyImage(device_, attachment, nullptr);
+        return false;
+    }
+    if (!check(vkBindImageMemory(device_, attachment, memory, 0), "mesh offscreen vkBindImageMemory", error)) {
+        vkFreeMemory(device_, memory, nullptr);
+        vkDestroyImage(device_, attachment, nullptr);
+        return false;
+    }
+    const bool drawn = sampleInto(attachment, VkExtent2D{size, size}, outRgba, error, true);
+    vkFreeMemory(device_, memory, nullptr);
+    vkDestroyImage(device_, attachment, nullptr);
+    return drawn;
+}
+
 void VkRenderer::shutdown() {
     if (device_ != VK_NULL_HANDLE) vkDeviceWaitIdle(device_);
     destroySwapchain(false);
@@ -1432,6 +1865,11 @@ void VkRenderer::shutdown() {
     if (vertexBuffer_ != VK_NULL_HANDLE && device_ != VK_NULL_HANDLE) vkDestroyBuffer(device_, vertexBuffer_, nullptr);
     vertexMemory_ = VK_NULL_HANDLE;
     vertexBuffer_ = VK_NULL_HANDLE;
+    if (meshMemory_ != VK_NULL_HANDLE && device_ != VK_NULL_HANDLE) vkFreeMemory(device_, meshMemory_, nullptr);
+    if (meshBuffer_ != VK_NULL_HANDLE && device_ != VK_NULL_HANDLE) vkDestroyBuffer(device_, meshBuffer_, nullptr);
+    meshMemory_ = VK_NULL_HANDLE;
+    meshBuffer_ = VK_NULL_HANDLE;
+    meshVertexCount_ = 0;
     if (commandPool_ != VK_NULL_HANDLE && device_ != VK_NULL_HANDLE) {
         vkDestroyCommandPool(device_, commandPool_, nullptr);
         commandPool_ = VK_NULL_HANDLE;

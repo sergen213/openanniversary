@@ -19,16 +19,18 @@ What it does, in order:
 
 1. Fresh `Debug` configure with `-DOA_BUILD_TESTS=ON`, **no** sanitizers → build → `ctest --output-on-failure`.
 2. Renderer smoke under a virtual X display (`xvfb-run -a`): `oa-game --selfCheck=true --frames=3`, plus the container
-   open path when `OA_GAME_DIR` is supplied. Skips with exit 77 if `xvfb-run` or a Vulkan ICD is unavailable, so a
-   headless machine without drivers cannot report a false pass.
+   open path and one shipped triangle run (`--mesh=<hash>`, override with `OA_MESH_RECORD`) when `OA_GAME_DIR` is supplied.
+   Skips with exit 77 if `xvfb-run` or a Vulkan ICD is unavailable, so a headless machine without drivers cannot report a
+   false pass.
 3. Second configure with `-DOA_SANITIZE=ON` (ASan+UBSan) → build → **unit tests only**. Driver/SDL allocations are known
    to leak inside vendor code, so sanitizers guard the parser/core layer, not the display path.
 
-Verified on this host (CachyOS, GCC 16.2.1): plain suite 12/12; the renderer smoke passes against the real GPU through the
-Wayland session ("self-check passed", 3 frames presented); ASan+UBSan suite 12/12. The same step under Xvfb without DRI3
-exits 77 as a documented skip ("no presentation-capable Vulkan device") instead of failing, since that is an environment
-gap rather than a regression. Runner-side behaviour (Ubuntu image plus `mesa-vulkan-drivers`/lavapipe) is *not* verified
-yet — see §6.
+Verified on this host (CachyOS, GCC 16.2.1): plain suite 33/33; the renderer smoke passes against the real GPU through the
+Wayland session ("self-check passed", 3 frames presented, and with `OA_GAME_DIR` set the mesh probe reports its coverage);
+ASan+UBSan suite green. The same step under Xvfb without DRI3 exits 77 as a documented skip ("no presentation-capable
+Vulkan device") instead of failing, since that is an environment gap rather than a regression — measured here: Xvfb reports
+"No DRI3 support detected" and the renderer refuses with "no graphics+present queue with a swapchain-capable device".
+Runner-side behaviour (Ubuntu image plus `mesa-vulkan-drivers`/lavapipe) is *not* verified yet — see §6.
 
 ## 2. Unit tests (`oa_tests`, GoogleTest via CTest)
 
@@ -104,6 +106,14 @@ Four independent checks, because "it drew something" is not evidence:
   window the content measured from x=489 across the full drawable height - a centred 1240 px square with clear-colour bars
   at both sides - and matches `oa-asset texture --path 'pc-w\lara.drm' --section 0` texel for texel in layout, which is
   the cross-check between the CPU decode and the GPU upload path.
+* **Shipped geometry on screen** — `oa-game --gameDir="<install>" --mesh=8baf540e --selfCheck=true` draws level unit
+  `8baf540e` section 0 (149,077 vertex records) as an unindexed run. Two measurements come out of one run: the log line
+  `drawing section 0 … 149077 vertices, 49692 triangles, bounds 55103x55225x50366 world units`, and the offscreen probe
+  `mesh probe: 6768/9216 pixels covered by 12829 distinct vertex colours, 0 unexplained` — every lit pixel equal to one of
+  the shipped colour bytes within an sRGB step. A desktop capture of a 900x600 window on this Wayland session shows the
+  level silhouette with facet colours and depth occlusion, but it cannot serve as the byte check: KDE's compositor remaps
+  window pixels, so not one of the ~540k window pixels equalled a shipped byte exactly here. Capture for shape, probe for
+  bytes (`docs/formats/GEOMETRY.md` §6).
 
 Validation-layer runs must be clean apart from the host's stale `liblsfg-vk-layer.so` loader messages documented in
 `docs/ENVIRONMENT.md`; anything else is a bug to fix, not to suppress.

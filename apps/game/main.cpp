@@ -3,6 +3,7 @@
 
 #include "cdc/Bigfile.hpp"
 #include "cdc/Drm.hpp"
+#include "cdc/Geometry.hpp"
 #include "cdc/Texture.hpp"
 #include "core/Config.hpp"
 #include "core/Log.hpp"
@@ -12,6 +13,8 @@
 #include <cstdlib>
 #include <chrono>
 #include <cstdio>
+#include <set>
+#include <vector>
 #include <string>
 
 #include <filesystem>
@@ -195,6 +198,7 @@ int main(int argc, char** argv) {
         for (const oa::cdc::Pcd9LevelRegion& region : oa::cdc::pcd9LevelRegions(info)) {
             upload.levels.push_back(oa::render::TextureUpload::Level{region.offset, region.bytes});
         }
+
         if (!renderer.uploadTexture(upload, &error)) {
             OA_LOG(oa::LogLevel::Error, "app", "texture upload failed: {}", error);
             return 1;
@@ -203,6 +207,148 @@ int main(int argc, char** argv) {
                texturePath, info.width, info.height, info.mipLevels, static_cast<int>(format));
     }
 
+    // --mesh=<record> draws one shipped triangle run with vertex colours, straight out of the container: no scene
+    // graph, no materials (docs/formats/GEOMETRY.md §6). --section is hexadecimal like --texture's; without it the
+    // largest stored type-0 section is used, which is a convenience for level units only — §1 shows why it is not a
+    // general rule. --yaw/--pitch/--zoom orbit and fit the camera so one run frames identically every time.
+    const std::string meshPath = config.str("mesh");
+    if (!meshPath.empty()) {
+        oa::cdc::BigfileSet archive;
+        if (!archive.open(config.str("gameDir"), &error)) {
+            OA_LOG(oa::LogLevel::Error, "app", "--mesh needs a readable container: {}", error);
+            return 2;
+        }
+        auto record = archive.find(meshPath);
+        if (!record && meshPath.size() == 8) {
+            // Most level units are unnamed: the archive only stores their path hash, so eight hexadecimal digits
+            // address them directly (docs/formats/DRM.md §1).
+            const auto wantedHash = static_cast<std::uint32_t>(std::strtoul(meshPath.c_str(), nullptr, 16));
+            for (std::size_t i = 0; i < archive.records().size(); ++i) {
+                if (archive.records()[i].hash == wantedHash) {
+                    record = i;
+                    break;
+                }
+            }
+        }
+        if (!record) {
+            OA_LOG(oa::LogLevel::Error, "app", "no record for '{}'", meshPath);
+            return 2;
+        }
+        const std::vector<std::byte> unitImage = archive.read(*record, &error);
+        if (unitImage.empty() && !error.empty()) {
+            OA_LOG(oa::LogLevel::Error, "app", "{}", error);
+            return 2;
+        }
+        oa::cdc::DrmFile drm;
+        if (!oa::cdc::DrmFile::parse(unitImage, &drm, &error)) {
+            OA_LOG(oa::LogLevel::Error, "app", "'{}' is not a DRM unit: {}", meshPath, error);
+            return 2;
+        }
+
+        const std::string sectionText = config.str("section");
+        int chosen = -1;
+        if (!sectionText.empty()) {
+            const auto index = static_cast<std::size_t>(std::strtoul(sectionText.c_str(), nullptr, 16));
+            if (index >= drm.sections().size()) {
+                OA_LOG(oa::LogLevel::Error, "app", "section {} is out of range in '{}' ({} section(s))", sectionText,
+                       meshPath, drm.sections().size());
+                return 2;
+            }
+            chosen = static_cast<int>(index);
+        } else {
+            // The largest stored general section: a level unit's geometry dwarfs its sound and script blocks.
+            for (std::size_t i = 0; i < drm.sections().size(); ++i) {
+                const oa::cdc::DrmSection& s = drm.sections()[i];
+                if (!s.stored || s.type != 0) continue;
+                if (chosen < 0 || drm.sections()[static_cast<std::size_t>(chosen)].size < s.size) {
+                    chosen = static_cast<int>(i);
+                }
+            }
+        }
+        if (chosen < 0) {
+            OA_LOG(oa::LogLevel::Error, "app", "'{}' has no stored general section to draw", meshPath);
+            return 2;
+        }
+        const oa::cdc::DrmSection& geometry = drm.sections()[static_cast<std::size_t>(chosen)];
+        const std::span<const std::byte> payload = drm.payload(geometry);
+        std::vector<oa::cdc::MeshVertex> vertices;
+        if (!oa::cdc::decodeMesh(payload, &vertices, &error)) {
+            OA_LOG(oa::LogLevel::Error, "app", "section {} of '{}' is not a triangle run: {}", chosen, meshPath, error);
+            return 2;
+        }
+        const oa::cdc::MeshBounds bounds = oa::cdc::meshBounds(vertices);
+
+        oa::render::MeshUpload mesh;
+        // The buffer is the payload itself: the vertex layout is identical, so there is nothing to repack.
+        mesh.bytes = payload.data();
+        mesh.vertexCount = static_cast<std::uint32_t>(vertices.size());
+        for (int axis = 0; axis < 3; ++axis) {
+            mesh.boundsMin[axis] = bounds.min[axis];
+            mesh.boundsMax[axis] = bounds.max[axis];
+        }
+        if (!renderer.uploadMesh(mesh, &error)) {
+            OA_LOG(oa::LogLevel::Error, "app", "cannot upload the triangle run: {}", error);
+            return 2;
+        }
+        oa::render::MeshCamera camera;
+        if (const std::string yaw = config.str("yaw"); !yaw.empty()) camera.yaw = std::strtof(yaw.c_str(), nullptr);
+        if (const std::string pitch = config.str("pitch"); !pitch.empty()) {
+            camera.pitch = std::strtof(pitch.c_str(), nullptr);
+        }
+        if (const std::string zoom = config.str("zoom"); !zoom.empty()) camera.zoom = std::strtof(zoom.c_str(), nullptr);
+        renderer.setMeshCamera(camera);
+        OA_LOG(oa::LogLevel::Info, "app", "drawing section {} of '{}' (id {}, type {}): {} vertices, {} triangles, "
+                                         "bounds {:.0f}x{:.0f}x{:.0f} world units",
+               chosen, meshPath, geometry.id, static_cast<int>(geometry.type), vertices.size(), bounds.triangles,
+               bounds.max[0] - bounds.min[0], bounds.max[1] - bounds.min[1], bounds.max[2] - bounds.min[2]);
+
+        // With --self-check the same mesh is drawn offscreen and every lit pixel must be one of the shipped vertex
+        // colours: that one pass proves upload, index format, matrix convention and the colour path (docs/TESTING.md).
+        if (config.flag("selfCheck", false)) {
+            std::vector<std::byte> pixels;
+            constexpr std::uint32_t kProbeSize = 96u;
+            if (!renderer.renderMeshOffscreen(&pixels, kProbeSize, &error)) {
+                OA_LOG(oa::LogLevel::Error, "app", "mesh probe failed: {}", error);
+                return 2;
+            }
+            std::set<std::uint32_t> shipped;
+            for (const oa::cdc::MeshVertex& v : vertices) {
+                shipped.insert((static_cast<std::uint32_t>(v.red) << 16) | (static_cast<std::uint32_t>(v.green) << 8) |
+                               v.blue);
+            }
+            std::size_t lit = 0, unexpected = 0;
+            for (std::uint32_t y = 0; y < kProbeSize; ++y) {
+                for (std::uint32_t x = 0; x < kProbeSize; ++x) {
+                    const std::size_t at = (static_cast<std::size_t>(y) * kProbeSize + x) * 4u;
+                    // B8G8R8A8_SRGB: the stored byte is the display-encoded value, so it compares against the
+                    // shipped colour byte directly, up to one step of rounding.
+                    const auto blue = static_cast<std::uint32_t>(pixels[at + 0]);
+                    const auto green = static_cast<std::uint32_t>(pixels[at + 1]);
+                    const auto red = static_cast<std::uint32_t>(pixels[at + 2]);
+                    if (blue < 8u && green < 8u && red < 8u) continue;  // the transparent clear showing through
+                    ++lit;
+                    bool known = false;
+                    for (int dr = -1; dr <= 1 && !known; ++dr) {
+                        for (int dg = -1; dg <= 1 && !known; ++dg) {
+                            for (int db = -1; db <= 1 && !known; ++db) {
+                                if (shipped.count(((red + dr) << 16) | ((green + dg) << 8) | (blue + db))) {
+                                    known = true;
+                                }
+                            }
+                        }
+                    }
+                    if (!known) ++unexpected;
+                }
+            }
+            OA_LOG(oa::LogLevel::Info, "app", "mesh probe: {}/{} pixels covered by {} distinct vertex colours, {} "
+                                             "unexplained",
+                   lit, kProbeSize * kProbeSize, shipped.size(), unexpected);
+            if (lit == 0 || unexpected > 0) {
+                OA_LOG(oa::LogLevel::Error, "app", "mesh probe failed: empty or unexplained coverage");
+                return 2;
+            }
+        }
+    }
     const int frameLimit = config.integer("frames", 0);
     int frames = 0;
     int lastWidth = window.widthPixels();

@@ -157,5 +157,6 @@ done < recs.txt | sort | uniq -c | sort -rn
 ```
 
 Consequence for the reconstruction: the container path is no longer an unknown. Every v14 unit in the install can be
-walked to its payloads; what still has no reader is geometry (`docs/formats/GEOMETRY.md` §5) and the audio/video payload
-families.
+walked to its payloads; a general section's unindexed triangle run now decodes and draws (`docs/formats/GEOMETRY.md` §2,
+§6), while what still has no reader is the index/oct-tree layer behind it (§5), the material-to-texture link, and the
+audio/video payload families.

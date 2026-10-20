@@ -37,11 +37,13 @@ possible and is the reason `oa_tests` currently runs in 10 ms.
 
 `apps/game/main.cpp` reads configuration (defaults < `openanniversary.ini`/`$OA_CONFIG` < `--key=value`), opens the
 container if `gameDir` is set (logging record and part counts as a smoke test of the asset path) and, when `--texture`
-names a record, parses it as a DRM v14 unit far enough to upload one PCD9 mip chain. Then it creates an SDL3 window,
-initialises Vulkan with the validation layer when available, and loops: pump events → resize check → clear pass into a
-swapchain image, with the bound textured quad drawn over it whenever a texture is uploaded (premultiplied alpha, one push
-constant for the aspect-fit letterbox) → present. The frame loop uses one fence plus one acquire semaphore per swapchain
-image, which is enough to keep exactly one frame in flight while still overlapping acquisition and submission.
+names a record, parses it as a DRM v14 unit far enough to upload one PCD9 mip chain; `--mesh=<record-or-hash>` does the
+same walk for a general section and uploads its stride-20 vertex records unchanged (`docs/formats/GEOMETRY.md` §6). Then
+it creates an SDL3 window, initialises Vulkan with the validation layer when available, and loops: pump events → resize
+check → one pass into a swapchain image that first draws the uploaded triangle run (depth-tested against itself, orbit
+camera through push constants) and then the textured quad over it (premultiplied alpha, one push constant for the
+aspect-fit letterbox) → present. The frame loop uses one fence plus one acquire semaphore per swapchain image, which is
+enough to keep exactly one frame in flight while still overlapping acquisition and submission.
 
 `VkRenderer::selfCheck()` proves the device path independent of what is on screen, in two phases. It clears an offscreen
 `R8G8B8A8_UNORM` image (unorm keeps clear floats linear) and compares every read-back pixel against the clear colour
@@ -51,6 +53,12 @@ second phase is what catches descriptor, layout-transition and blend mistakes, a
 pipeline's colour format or the draw is invalid. That pair is the repeatable test hook CI uses; the swapchain path is
 exercised by counting presented frames. A resize recreates swapchain, render pass and pipeline together, because a
 pipeline belongs to the pass it was built against.
+
+Geometry gets the same offscreen treatment from `VkRenderer::renderMeshOffscreen()`: it draws the uploaded run into a
+96x96 attachment with `sampleInto(…, drawMesh = true)` and reads the pixels back, so a headless run can require that the
+shipped positions and colours really reach pixels. Because both pipelines were built against the window pass, every probe
+pass declares the same two attachments (colour plus a temporary depth image) — render-pass compatibility is what makes the
+draw valid, not an implementation detail of one pipeline.
 
 ## Deliberate omissions so far
 

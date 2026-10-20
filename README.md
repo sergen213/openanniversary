@@ -4,10 +4,11 @@ A free, original reimplementation of *Tomb Raider: Anniversary* (2007, Crystal D
 for Linux and Windows, built from the ground up. No game code, no game assets and no proprietary binaries
 are part of this repository; you must own a legally obtained copy of the game and point the loader at it.
 
-Status: **pre-alpha**. The container layer (cdc `bigfile` archives) is implemented and verified against the shipped
-archive, and a native SDL3 + Vulkan window renders real presented frames on Linux without Wine or Proton. Payload
-parsing (DRM v14 units), geometry rendering and gameplay are still ahead. See `CHANGELOG.md`, `docs/ARCHITECTURE.md`
-and `docs/ROADMAP.md`.
+Status: **pre-alpha**. The container layer (cdc `bigfile` archives) and the DRM v14 unit parser are implemented and
+verified against the shipped archive, and a native SDL3 + Vulkan window renders real presented frames on Linux without
+Wine or Proton - including shipped texture mip chains and one level unit's unindexed triangle run drawn from its own
+bytes (`docs/formats/GEOMETRY.md` §6). The index/oct-tree layer that says which records form a model, materials and
+gameplay are still ahead. See `CHANGELOG.md`, `docs/ARCHITECTURE.md` and `docs/ROADMAP.md`.
 
 ## Legal posture
 

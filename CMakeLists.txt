@@ -27,7 +27,7 @@ find_package(Vulkan REQUIRED)
 # stores GLSL rather than a binary blob and every shader shows up in the build log.
 find_program(OA_GLSLANG glslangValidator REQUIRED)
 set(OA_SHADER_OUTPUTS "")
-foreach(source IN ITEMS shaders/quad.vert shaders/quad.frag)
+foreach(source IN ITEMS shaders/quad.vert shaders/quad.frag shaders/mesh.vert shaders/mesh.frag)
   get_filename_component(shaderName "${source}" NAME)
   set(shaderOutput "${CMAKE_BINARY_DIR}/shaders/${shaderName}.spv")
   add_custom_command(OUTPUT "${shaderOutput}"
@@ -39,7 +39,7 @@ endforeach()
 add_custom_target(oa_shaders ALL DEPENDS ${OA_SHADER_OUTPUTS})
 
 # cdc container layer: bigfile archives of the Legend-era engine (docs/formats/CONTAINERS.md).
-add_library(oa_cdc STATIC src/cdc/Bigfile.cpp src/cdc/Drm.cpp src/cdc/Texture.cpp)
+add_library(oa_cdc STATIC src/cdc/Bigfile.cpp src/cdc/Drm.cpp src/cdc/Texture.cpp src/cdc/Geometry.cpp)
 target_include_directories(oa_cdc PUBLIC src)
 target_link_libraries(oa_cdc PUBLIC ZLIB::ZLIB)
 
@@ -65,7 +65,8 @@ add_dependencies(oa-game oa_shaders)
 if(OA_BUILD_TESTS)
   enable_testing()
   find_package(GTest REQUIRED)
-  add_executable(oa_tests tests/test_bigfile.cpp tests/test_core.cpp tests/test_drm.cpp tests/test_texture.cpp)
+  add_executable(oa_tests tests/test_bigfile.cpp tests/test_core.cpp tests/test_drm.cpp tests/test_geometry.cpp
+                       tests/test_texture.cpp)
   target_link_libraries(oa_tests PRIVATE oa_cdc oa_core GTest::gtest_main)
   include(GoogleTest)
   gtest_discover_tests(oa_tests)

@@ -1,6 +1,7 @@
 #pragma once
-// Vulkan renderer for the native front end: instance, surface from SDL, device selection, swapchain and a frame
-// loop. The first milestone renders a clear pass only; geometry arrives with the DRM unit parser.
+// Vulkan renderer for the native front end: instance, surface from SDL, device selection, swapchain, a frame loop
+// and offscreen read-back. It draws two things today: one textured quad (docs/formats/TEXTURES.md) and one
+// unindexed triangle run with vertex colours (docs/formats/GEOMETRY.md §2, §6).
 //
 // Failure convention matches the rest of the tree: bool return plus std::string* error, no exceptions.
 
@@ -39,6 +40,23 @@ struct TextureUpload {
     const void* bytes = nullptr;
     std::size_t byteSize = 0;
 };
+
+// One geometry payload ready for upload: the record bytes of a general section, as many whole 20-byte vertices
+// as they hold, plus the bounds the caller measured so the camera can be fitted without walking them again here.
+struct MeshUpload {
+    const void* bytes = nullptr;
+    std::uint32_t vertexCount = 0;
+    float boundsMin[3] = {0.0f, 0.0f, 0.0f};
+    float boundsMax[3] = {0.0f, 0.0f, 0.0f};
+};
+
+// Orbit camera for the mesh: yaw and pitch in radians around the bounds centre, zoom scales the fit.
+struct MeshCamera {
+    float yaw = 0.7f;
+    float pitch = 0.4f;
+    float zoom = 1.0f;
+};
+
 class VkRenderer {
 public:
     ~VkRenderer();
@@ -62,6 +80,16 @@ public:
     bool uploadTexture(const TextureUpload& texture, std::string* error = nullptr);
     bool hasTexture() const { return texture_ != VK_NULL_HANDLE; }
 
+    // Uploads a triangle run and makes it the geometry drawn by subsequent frames, depth-tested against itself.
+    bool uploadMesh(const MeshUpload& mesh, std::string* error = nullptr);
+    bool hasMesh() const { return meshVertexCount_ != 0; }
+    void setMeshCamera(const MeshCamera& camera) { camera_ = camera; }
+
+    // Draws the uploaded mesh into an offscreen RGBA8 image and copies it back, so a headless run (Xvfb, CI) can
+    // assert that shipped vertex positions and colours really reach pixels. `size` is square in pixels.
+    bool renderMeshOffscreen(std::vector<std::byte>* outRgba, uint32_t size, std::string* error = nullptr);
+
+
     const std::string& deviceName() const { return deviceName_; }
     VkDevice device() const { return device_; }
     VkFormat swapchainFormat() const { return format_; }
@@ -77,12 +105,20 @@ private:
     bool createSurface(platform::Window& window, std::string* error);
     bool pickDevice(std::string* error);
     bool createSwapchain(int widthPixels, int heightPixels, std::string* error);
+    void destroySwapchain(bool waitForIdle);
     bool createRenderTargets(std::string* error);
     bool createPipeline(std::string* error);
     void destroyPipeline();
     void destroyTexture();
-    bool sampleInto(VkImage colourAttachment, VkExtent2D size, std::vector<std::byte>* outRgba, std::string* error);
-    void destroySwapchain(bool waitForIdle);
+    // `drawMesh` picks the mesh pipeline and its vertex buffer instead of the textured quad; either way the pass
+    // gets a depth attachment when there is geometry to sort against.
+    bool sampleInto(VkImage colourAttachment, VkExtent2D size, std::vector<std::byte>* outRgba, std::string* error,
+                    bool drawMesh = false);
+    bool createDepthImage(std::string* error);
+    void destroyDepthImage();
+    bool createMeshPipeline(std::string* error);
+    void destroyMeshPipeline();
+    void pushMeshMatrix(VkCommandBuffer command) const;
 
     static VKAPI_ATTR VkBool32 VKAPI_CALL debugMessenger(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
                                                          VkDebugUtilsMessageTypeFlagsEXT type,
@@ -120,6 +156,18 @@ private:
     float textureAspect_ = 1.0f;
     VkBuffer vertexBuffer_ = VK_NULL_HANDLE;
     VkDeviceMemory vertexMemory_ = VK_NULL_HANDLE;
+    VkImage depthImage_ = VK_NULL_HANDLE;
+    VkDeviceMemory depthMemory_ = VK_NULL_HANDLE;
+    VkImageView depthView_ = VK_NULL_HANDLE;
+
+    VkPipeline meshPipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout meshLayout_ = VK_NULL_HANDLE;
+    VkBuffer meshBuffer_ = VK_NULL_HANDLE;
+    VkDeviceMemory meshMemory_ = VK_NULL_HANDLE;
+    std::uint32_t meshVertexCount_ = 0;
+    MeshCamera camera_;
+    float meshCentre_[3] = {0.0f, 0.0f, 0.0f};
+    float meshRadius_ = 1.0f;
 
     VkCommandPool commandPool_ = VK_NULL_HANDLE;
     std::vector<VkCommandBuffer> commands_;

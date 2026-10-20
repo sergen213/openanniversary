@@ -18,7 +18,9 @@ ctest --test-dir "$scratch/plain" --output-on-failure
 
 echo "== 2/3 renderer smoke =="
 game_args=()
-[[ -n "${OA_GAME_DIR:-}" ]] && game_args+=(--gameDir="$OA_GAME_DIR")
+# With a real install available, draw one shipped triangle run too: the level unit hash is documented in
+# docs/formats/GEOMETRY.md §6, and OA_MESH_RECORD overrides it for another unit.
+[[ -n "${OA_GAME_DIR:-}" ]] && game_args+=(--gameDir="$OA_GAME_DIR" --mesh="${OA_MESH_RECORD:-8baf540e}")
 log="$scratch/smoke.log"; status=0
 if [[ -n "${WAYLAND_DISPLAY:-}" ]]; then
     "$scratch/plain/oa-game" --selfCheck=true --frames=3 "${game_args[@]}" >"$log" 2>&1 || status=$?

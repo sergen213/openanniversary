@@ -90,3 +90,34 @@ Next evidence, in order of directness:
 
 Acceptance rule for any layout claim here: counts plus bounding box reproduced from a shipped unit **and** the mesh
 rendered on screen. A plausible field table is not verification — §3 is what guessing looked like.
+
+## 6. Drawing a triangle run in `oa-game` [V-gpu]
+
+The decoder reads one general section as an unindexed run: whole 20-byte records, three consecutive records per
+triangle, no index buffer. That is the shape §2 measured for level unit `8baf540e` section 0 (2,981,540 bytes = exactly
+149,077 records), and it goes to the GPU as those same bytes — the vertex buffer *is* the payload, with position read
+as `R16G16B16_SINT` at +0 and colour as `R8G8B8A8_UNORM` at +8.
+
+    oa-asset "<install>" drm --hash 8baf540e --section 0 --out /tmp/sec0.bin      # the bytes, from docs §2 above
+    oa-game --gameDir="<install>" --mesh=8baf540e --section 0 --selfCheck=true     # unnamed records take their path hash
+    oa-game --gameDir="<install>" --mesh=8baf540e --yaw=0.7 --pitch=0.4 --zoom=1   # default: largest stored type-0 section
+
+Measured on `AMD Radeon RX 7900 XTX (RADV NAVI31)` with validation layers enabled, 2026-10-20 [V-gpu]:
+
+    drawing section 0 of '8baf540e' (id 0, type 0): 149077 vertices, 49692 triangles, bounds 55103x55225x50366 world units
+    mesh probe: 6768/9216 pixels covered by 12829 distinct vertex colours, 0 unexplained
+
+The first line is the acceptance rule of §5 met in part: counts and bounding box come out of a shipped unit (the vertex
+count is exactly payload size over 20 [V-data]), and the mesh is visibly there — a desktop capture of a 900x600 window on
+this Wayland session shows a level-sized silhouette with facet colours and depth occlusion against the clear colour, drawn
+by the same code path that presents frames. The second line is `VkRenderer::renderMeshOffscreen()` drawing that run into a
+96x96 sRGB attachment, reading it back and requiring every lit pixel to equal one of the shipped colour bytes, within one
+sRGB step: zero exceptions. That pass covers upload, vertex format, stride, matrix convention and the colour path, and it
+is the byte-exact check — a desktop screenshot is not one here, because this session's compositor remaps window pixels (not
+one of roughly 540k window pixels equalled a shipped byte exactly, while the silhouette was clearly present).
+
+What is *not* claimed: winding order (nothing is culled — a wrong guess would delete half of every level instead of
+exposing the order), how the modulate bytes combine with textures, or that section 0 is the whole level. The colour path
+is deliberately flat-shaded (`flat` in `shaders/mesh.vert` and `mesh.frag`): no material found so far ties those bytes to
+an interpolation rule (§5), and a flat colour makes every pixel of a triangle one shipped byte, which is what turns the
+probe into an exact check rather than "close enough". Smooth vertex colouring waits for evidence that says so.
