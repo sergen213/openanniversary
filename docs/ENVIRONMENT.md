@@ -48,6 +48,27 @@ not part of the 2007 release and not used by this project).
 Read-only rule: tools open these files with `"rb"` only. Extracted payloads go to a scratch directory outside both
 the install and this repository (`/tmp`).
 
+### Running the original for observation (private, never committed)
+
+The exe is 32-bit PE, so it runs only under Wine. Reproduce on this host [V-data]:
+
+```sh
+# a copy keeps the purchased install pristine; the prefix and copy live in the private work dir
+cp -a "/mnt/2nd4TB/TombRaiderAnniversary/Tomb Raider Anniversary" ../openanniversary-work/wine-drive/trawork
+WINEPREFIX=$PWD/../openanniversary-work/wine-tra wineboot -u                       # 441 MB prefix
+D=~/.config/heroic/tools/dxvk/dxvk-3.1                                             # DXVK already on the machine
+cp $D/x32/*.dll ../openanniversary-work/wine-tra/drive_c/windows/syswow64/          # d3d8, d3d9, dxgi (32-bit)
+cp $D/x64/*.dll ../openanniversary-work/wine-tra/drive_c/windows/system32/
+cd ../openanniversary-work/wine-drive/trawork && DISPLAY=:0 wine ./tra.exe          # window titled
+                                                                                  # "Tomb Raider: Anniversary" appears
+```
+
+Measured: the process survives boot (RSS 214 MB at the menu, 265 MB after a menu choice), X reports its window title, and
+the install's own `d3d9.dll`/`dxwrapper.dll` shims stay in front of DXVK as shipped. RenderDoc 1.45 (Arch package) produced
+**no capture at all** this way - the Linux build does not inject into Wine guest processes, so capturing D3D traffic needs a
+Windows RenderDoc inside the prefix [V-data]. Runtime evidence therefore comes from reading `/proc/<pid>/maps` and
+`/proc/<pid>/mem` of the running process (read-only) rather than a GPU capture.
+
 ## Display and visual verification
 
 * KDE Plasma on Wayland (`$WAYLAND_DISPLAY=wayland-1`, compositor `kwin_wayland`); an XWayland bridge answers at

@@ -82,13 +82,35 @@ Reproduce: `objdump -p "…/Tomb Raider Anniversary/tra.exe"`; imports via
 | Entry point | RVA `0x238ce8` | — |
 | Linker version | 7.0 (MSVC .NET 2003-era) | period style: fixed structs, little C++ exception use in hot paths |
 | Characteristics | `0x10f`: relocs stripped, symbols/lines stripped | **no base relocations** → image must load at `0x400000`; our Ghidra project pins that base so address-keyed notes stay stable |
-| `DllCharacteristics` | `0x0000` | no ASLR/DEP/CFG; matters only if the original were ever instrumented (we do not run it) |
+| `DllCharacteristics` | `0x0000` | no ASLR/DEP/CFG; only relevant when instrumenting the original, which happens in a private Wine prefix (`docs/ENVIRONMENT.md`, "Running the original for observation") |
 | Data directories | import `0x85f000`, resource `0x85b000`; exports/exception/bound-import/delay-load empty | no exported symbols to harvest; engine symbols come from disassembly [V-exe] |
 | Imported DLLs | `advapi32, binkw32, comctl32, gdi32, kernel32, ole32, oleaut32, shell32, user32, winmm` | **no d3d9/dinput/xaudio import** → Direct3D and input are resolved dynamically; Bink video via `binkw32.dll`; audio through `winmm` plus the engine's own ADPCM [S] §2 |
 | Timestamp | `1969-12-31 19:00:00` (zeroed build stamp) | unusable for dating the build |
 
 Corollary: the install also carries third-party `d3d9.dll`/`dxwrapper.dll` shims (`docs/ENVIRONMENT.md`). This project
 reads none of them; our renderer talks Vulkan directly.
+
+### 5.1 Chapter selection reaches real loader code, measured [V-exe]
+
+A menu table at `0x6639bc` named `Chapters` holds fifteen entries (`chapter1` … `chapter15`, string addresses
+`0x664854`…`0x6649a4`), each paired with the same handler. Reading it out of the image and then decompiling the chain:
+
+| address | what it does [V-exe] |
+| --- | --- |
+| `FUN_00427a30` | takes the selected entry, checks `1 < index <= count`, calls `FUN_00422090(entry)` with a 400-byte record stride |
+| `FUN_00422090` | `stricmp`s the chapter name against the table, then sets current-chapter globals and calls `FUN_00455890(index)`; failure prints `chapter %s doesn't exist` (`0x6505cc`) |
+| `FUN_00455890` | level start; its only callee is `FUN_004559f0`, and it is also called from the container-side `FUN_005bf770` |
+| `FUN_004559f0` | chapter bookkeeping: picks a per-chapter short out of the record at `DAT_00812c68 + 4`, and makes an indirect call through `PTR_FUN_0066543C` |
+
+That pointer slot (`0x66543C`) stores `FUN_004e8540` in the image - a function whose body is just `return;` - so the real
+level-load routine is installed at runtime, and no static write to that slot exists (base-relative addressing again). The
+same trick explains why string-based xref hunting fails (`docs/formats/GEOMETRY.md` §17).
+
+A console flag table sits beside it: entries every twelve bytes from `0x664c58` to `0x664d90` name `polylines`, `qstats`,
+`collision`, `tcollision`, `signals`, `axis`, `bones`, `constraints`, `radius`, `noterrain`, `normals`, `noweighting`,
+`soft`, `markup`, `markers`, `vmarkers`, `pmarkers`, `portals`, `nohud`, `streamsignals`, `timeline`, `texttvsafe`,
+`graphictvsafe`, `uimemory`, `dontdisablemenus`, `donthidemenus`, `unlockall` [V-data]. Those are engine debug switches,
+and they mark the terrain/collision drawing code as switchable at runtime - useful handles when reading that code.
 
 ## 6. Language/toolchain status (goal §2) **[S] + [V-data]**
 
