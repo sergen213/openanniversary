@@ -80,18 +80,21 @@ int main(int argc, char** argv) {
     oa::render::RendererConfig renderConfig;
     renderConfig.applicationName = windowConfig.title;
     renderConfig.validation = config.flag("vk.validation", true);
+    // One teardown order for every exit path: the Vulkan surface belongs to SDL's window, so the renderer releases it
+    // while that window is still alive, and the video subsystem goes last.
+    struct Cleanup {
+        oa::render::VkRenderer& renderer;
+        oa::platform::Window& window;
+        ~Cleanup() { renderer.shutdown(); window.destroy(); oa::platform::Window::quitVideo(); }
+    } cleanup{renderer, window};
     if (!renderer.init(window, renderConfig, &error)) {
         OA_LOG(oa::LogLevel::Error, "app", "Vulkan init failed: {}", error);
-        window.destroy();
-        oa::platform::Window::quitVideo();
         return 2;
     }
 
     const bool selfCheck = config.flag("selfCheck", false);
     if (selfCheck && !renderer.selfCheck(&error)) {
         OA_LOG(oa::LogLevel::Error, "app", "Vulkan self-check failed: {}", error);
-        window.destroy();
-        oa::platform::Window::quitVideo();
         return 1;
     }
 
@@ -124,9 +127,5 @@ int main(int argc, char** argv) {
     OA_LOG(oa::LogLevel::Info, "app", "presented {} frame(s) on '{}' in {:.3f}s ({:.1f} fps)", frames,
            renderer.deviceName(), seconds, seconds > 0.0 ? frames / seconds : 0.0);
 
-    // The Vulkan surface belongs to SDL's window, so the renderer must release it before the window dies.
-    renderer.shutdown();
-    window.destroy();
-    oa::platform::Window::quitVideo();
     return frames > 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

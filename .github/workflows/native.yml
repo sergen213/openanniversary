@@ -1,0 +1,35 @@
+name: native
+
+# Mirrors scripts/ci.sh (the canonical pipeline). This workflow has never executed yet: the repository has no remote,
+# so treat the runner package set below as unverified until the first green run.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config git ca-certificates \
+            zlib1g-dev libgtest-dev libvulkan-dev mesa-vulkan-drivers xvfb x11-apps \
+            libx11-dev libxext-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
+            libwayland-dev wayland-protocols libdecor-0-dev libasound2-dev libpulse-dev libdbus-1-dev
+
+      - name: Build SDL3 (pinned tag)
+        run: |
+          git clone --depth 1 --branch release-3.2.0 https://github.com/libsdl-org/SDL "$RUNNER_TEMP/SDL"
+          cmake -S "$RUNNER_TEMP/SDL" -B "$RUNNER_TEMP/SDL-build" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$HOME/sdl3" \
+            -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TEST_LIBRARY=OFF -DSDL_EXAMPLES=OFF
+          cmake --build "$RUNNER_TEMP/SDL-build"
+          cmake --install "$RUNNER_TEMP/SDL-build"
+
+      - name: Unit tests, renderer smoke, sanitizer suite
+        run: LD_LIBRARY_PATH="$HOME/sdl3/lib" scripts/ci.sh

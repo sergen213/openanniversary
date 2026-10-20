@@ -25,6 +25,11 @@ zero version and has no releases yet.
   pixel against the clear colour within one byte.
 - Documentation: `README.md`, `docs/ENVIRONMENT.md`, `docs/ARCHITECTURE.md`, `docs/formats/CONTAINERS.md`,
   `docs/EXISTING_PROJECT_AUDIT.md`, `docs/ROADMAP.md`, `docs/formats/DRM.md`.
+- `scripts/ci.sh`: the canonical pipeline — plain unit-test run, renderer smoke on a real Wayland session or under Xvfb
+  (exit 77 skip when nothing can present), then the same suite built with `-DOA_SANITIZE=ON`. `.github/workflows/native.yml`
+  mirrors it and pins SDL3 to tag `release-3.2.0`; the workflow has never executed because this repository has no remote.
+- `docs/RESEARCH.md`: prior art with links and license boundaries, the PCD magic cross-check between engine generations,
+  and a full `tra.exe` PE/import inventory (`objdump -p`). `docs/TESTING.md`: procedures, fixture policy, uncovered areas.
 
 ### Verified
 - Container unit tests (12 passing through CTest): golden path hashes taken from the shipped archive
@@ -53,6 +58,17 @@ zero version and has no releases yet.
   exactly 1600x893 px at (1120, 649) — the requested client size at scale factor 1, a few bottom rows hidden by the
   desktop panel. With validation enabled the only reported messages are the host's
   stale `liblsfg-vk-layer.so` loader entries described in `docs/ENVIRONMENT.md`.
+
+- `scripts/ci.sh` executed end-to-end here: plain suite 12/12; renderer smoke on Wayland with the RX 7900 XTX reported
+  "self-check passed" and presented 3 frames; ASan+UBSan suite 12/12. Under Xvfb without DRI3 the same step exits 77 as a
+  documented skip rather than failing.
+
+### Fixed
+
+- Teardown order on early-exit paths (Vulkan init failure, self-check failure): the SDL window and video subsystem were
+  destroyed while a `VkSurfaceKHR` was still alive, so validation reported `vkDestroyInstance(): … has 1 leaked objects`,
+  naming the surface. One RAII cleanup object now fixes the order for every exit path. Measured under Xvfb (no DRI3):
+  the same failing path printed the leak before the change and prints none after.
 
 ### Not yet implemented
 
