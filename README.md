@@ -4,8 +4,10 @@ A free, original reimplementation of *Tomb Raider: Anniversary* (2007, Crystal D
 for Linux and Windows, built from the ground up. No game code, no game assets and no proprietary binaries
 are part of this repository; you must own a legally obtained copy of the game and point the loader at it.
 
-Status: **pre-alpha**. The container layer (cdc `bigfile` archives) is implemented and verified against the
-shipped archive; a first window with a Vulkan clear-colour frame is next. See `CHANGELOG.md`.
+Status: **pre-alpha**. The container layer (cdc `bigfile` archives) is implemented and verified against the shipped
+archive, and a native SDL3 + Vulkan window renders real presented frames on Linux without Wine or Proton. Payload
+parsing (DRM v14 units), geometry rendering and gameplay are still ahead. See `CHANGELOG.md`, `docs/ARCHITECTURE.md`
+and `docs/ROADMAP.md`.
 
 ## Legal posture
 
@@ -32,6 +34,7 @@ Vulkan SDK + SDL3 are added with the rendering layer; see `docs/ENVIRONMENT.md` 
 | Tool | Purpose |
 | --- | --- |
 | `build/oa-asset` | Inspect and extract a shipped `bigfile.NNN` archive (read-only) |
+| `build/oa-game` | Native window + Vulkan frame loop; `--selfCheck=true` proves read-back without a display |
 
 ```sh
 # list every record of an install, resolve names, extract one unit

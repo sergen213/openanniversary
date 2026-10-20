@@ -5,10 +5,10 @@ acceptance evidence exists in this repository; otherwise it says what is missing
 
 | # | Milestone | Status | Evidence / next step |
 | --- | --- | --- | --- |
-| 1 | Environment and research | **in progress** | Done: system audit (`docs/ENVIRONMENT.md`), game install located read-only, container format documented with addresses (`docs/formats/CONTAINERS.md`), toolchain verified. Open: six-project audit (`docs/EXISTING_PROJECT_AUDIT.md`) and architecture decision record. |
-| 2 | Buildable native foundation | **not started** | CMake + library/tool/test targets exist, but no window, logging, configuration or Vulkan yet. Acceptance needs a native executable showing a real Vulkan-rendered frame with no Wine/Proton. Next: SDL3 window, device enumeration, one clear-colour swapchain image presented. |
+| 1 | Environment and research | **done** | System audit (`docs/ENVIRONMENT.md`), game install located read-only, container format documented with addresses (`docs/formats/CONTAINERS.md`), toolchain verified, six-project audit (`docs/EXISTING_PROJECT_AUDIT.md`), architecture recorded (`docs/ARCHITECTURE.md`). |
+| 2 | Buildable native foundation | **done** | `oa-game` builds and runs natively on CachyOS/Wayland with no Wine or Proton: SDL3 window, Vulkan instance with the validation layer active, device selection (AMD RX 7900 XTX), swapchain (`B8G8R8A8_SRGB`, FIFO, 4 images), a clear pass presented 600 times at ~158 fps, and an offscreen read-back self-check that matches the clear colour. The captured desktop shows the window filled with exactly that colour (see `CHANGELOG.md` for the reproduction command). |
 | 3 | Asset investigation and tooling | **partly done** | `oa-asset` lists/resolves/extracts records of the shipped archive; container parser validated by unit tests without game data and against the real install (948 of 949 object-list units resolved). Missing: a second asset type with its own parser + tests (DRM v14 section table is the next target). |
-| 4 | First game content | not started | Needs DRM v14 unit parsing (geometry/material sections) and M2. |
+| 4 | First game content | not started | Needs DRM v14 unit parsing (geometry/material sections); the renderer side needs its first vertex pipeline. |
 | 5 | Playable mechanics | not started | |
 | 6 | Functional game loop | not started | |
 | 7 | Modernization and usability | not started | |
