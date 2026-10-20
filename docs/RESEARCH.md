@@ -29,7 +29,7 @@ subsystem names are the vocabulary our layers must speak:
 | --- | --- |
 | `tr7/cdc/runtime/cdcFile/{FileSystem.h,FileReceivers.cpp}` | receiver chain reading bigfile records; matches the `ResolveReceiver_*`/`ResolveDecompressor_ParseCdrm` names from Underworld's binary [S] and our container disassembly [V-exe] |
 | `tr7/cdc/runtime/cdcRender/pc/shared/{PCShaderTable,PCVertexFormat,PCTexture,PCStaticVertexBuffer,…}.h/cpp` | render resources a DRM section deserialises into; naming for vertex formats/shader tables when geometry lands in `src/render` |
-| `tr7/cdc/runtime/cdcSound/win32/deADPCM.cpp` | engine ADPCM codec — candidate decoder for sound (type 6) sections |
+| `tr7/cdc/runtime/cdcSound/win32/deADPCM.cpp` | engine ADPCM codec; `tra.exe`'s own path agrees (`FUN_005eca10`: byte count / `0x24` blocks, output `blocks * 0x80`, i.e. 36-byte blocks in and 64 samples out), but which archive bytes feed it is still open - the measured stream-header fields, the encodings ruled out and the two evidence paths that would settle it are in `docs/formats/AUDIO.md` |
 | `tr7/cdc/runtime/cdcMath/*`, `cdcScene/Source/{Entity,SceneCellGroup}` | scene/entity model for Milestone 5 semantics |
 | `tr7/game/{terrain.h}`, `tr7/game/pc/D3D/d3dterrain.cpp` | the Anniversary terrain vocabulary - 20-byte `TerrainRenderVertex`, octree nodes, per-material strips drawn with i16 index lists plus a base-vertex offset; used to name and cross-check what §9 of `docs/formats/GEOMETRY.md` measured in our own bytes (clone kept at `openanniversary-work/priorart/cdcEngine`) |
 

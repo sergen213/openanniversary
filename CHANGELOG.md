@@ -95,9 +95,19 @@ zero version and has no releases yet.
   payload-wide hunt for header-shaped bytes is gone from library, app and tool; `oa-asset terrain --hash 8BAF540E` prints the
   leaf-driven walk per tree - nodes/leaves/depth, heads, records, bad heads, broken links, steps taken, triangle count, the index
   range reached and edge percentiles - and refuses to call a payload an oct-tree when its node fields say otherwise.
+- The mesh camera's key mapping moved out of the app loop into `oa::render::applyMeshKeys()` with a `MeshKeys` state struct
+  (`src/render/vk/VkRenderer.hpp`): arrows orbit with pitch clamped short of the poles, WASD slides the look-at target along the
+  view's own basis vectors, Q/E dolly the fit. Six `MeshCamera.*` tests now pin orbit direction and cancellation, the pole clamp
+  after hundreds of frames, dolly as an exact inverse pair, pan direction at yaw 0 and yaw pi/2, and that the running target is
+  mirrored into the camera - none of which needed a window.
+- `docs/formats/AUDIO.md`: what the sound payloads are known to be and, just as importantly, what has been measured not to be
+  them - the two payload families, the record header fields read from 1,984 rate-headed records, the engine's stream factory with
+  its four name prefixes, `tra.exe`'s winmm contract (stereo 16-bit PCM) and its ADPCM path (`FUN_005eca10`: 36-byte blocks in,
+  64 samples out), plus the encodings ruled out by measurement and the two evidence paths that would settle it. No decoder ships
+  while the payload encoding is unresolved.
 
 ### Verified
-- Container unit tests (through CTest; the suite is 47 cases today, these among them): golden path hashes taken from the
+- Container unit tests (through CTest; the suite is 53 cases today, these among them): golden path hashes taken from the
   shipped archive (`pc-w\generalbank.drm` → `0xB3AAAFD6`, `pc-w\lara.drm` → `0x5FF91900`), synthetic stored/zlib/
   raw-deflate records, part-boundary straddling, specialisation-mask selection, unsorted-index rejection, strict typed
   getters, log level filtering.
@@ -146,6 +156,25 @@ zero version and has no releases yet.
   window during that run shows the level silhouette with facet colours and depth occlusion; it is evidence of shape, not
   of bytes, because this session's compositor remaps window pixels (no window pixel equalled a shipped byte exactly).
   Validation reports nothing beyond the host's stale loader entries [V-gpu].
+
+- What an edge-length gate does and does not buy (`docs/formats/GEOMETRY.md` §18): with `--strips=true --fov=55` over unit
+  `8baf540e`, gating at 2,000 world units stopped 13,130 triangles while gating at 1,000 stopped 16,462 of the 135,914 sampled -
+  drawing 119,452 over 149,077 vertices from 4,776 strip records reached by 1,620 leaf references, 0 bad heads, 100 broken links.
+  Halving the bar removes 3,332 more triangles, and a desktop capture of that window shows one dark triangulated sheet with holes
+  where chains were dropped plus bright fans of near-degenerate triangles - not a recognizable level. Section 0's measured bounds
+  (3,282 x 2,447 x 1,640 units over 149,077 vertices) put nearest-neighbour scale near 45 units, which is why wrong chains pair up
+  with short edges and why no edge statistic can rank a vertex base [V-data] [V-screen].
+- Sound payloads probed without shipping a guess (`docs/formats/AUDIO.md`): of the first 3,000 size-filtered records, 1,984 open
+  with a sample-rate dword (mostly 44100) followed by `-1`, a large u32 and `1`; then a near-zero table region to about +0x800 and
+  a dense payload at ~90 % non-zero. Those payloads are not linear PCM in any width or channel order read (mean sample delta
+  0.96-1.2 x RMS, zero-crossing 0.45 = noise), not deflate at any offset, and carry no IMA/DVI block framing - across phases over
+  the first 4 KiB the step-index signature `<= 88` reaches at best 0.57 where a real stream must score 1.0. A scan of all 1,098
+  version-14 units' sections found 22 sections passing that signature; decoding them puts discontinuities at every block boundary
+  at ~18 x the interior delta, so they are coincidences [V-data]. From `tra.exe`: streams open through `FUN_00419a80` with type ids
+  `0x5a`/`0x46` and prefixes read from the pointer table at `0x66508c` (`event_triggered\`, `stingers\`, `montages\`,
+  `animation\`), winmm is opened as stereo 16-bit PCM (`FUN_0062d720`: tag 1, 2 channels, block align 4, rate x 4 bytes/s), and the
+  ADPCM path `FUN_005eca10` divides its byte count by `0x24` and allocates `blocks * 0x80` output - 36-byte blocks in, 64 samples
+  out - matching cdcEngine's `deADPCM.cpp` [V-exe] [S].
 
 - Type-7 sections characterised over the whole install (`docs/formats/GEOMETRY.md` §7): 37,871 sections in 1,086 of the
   1,098 version-14 units, 13,196,830 bytes, sizes 4 to 368,400 B with 53.7% exactly 48 B. The directory `id` is a key:
@@ -211,6 +240,12 @@ zero version and has no releases yet.
   with 22,328 tied); and a per-tree concatenation model gives overlapping spans. The median-longest-edge criterion used earlier
   rewarded degenerate reads - thousands of bases score 0.0 under it. Closing Milestone 4's geometry needs `tra.exe`'s terrain
   vertex-buffer build, not another search [V-data].
+- Three more routes to that terrain code, all empty (`docs/formats/GEOMETRY.md` §17): `tra.exe`'s 8,777,728 bytes hold no RTTI or
+  mangled names at all (0 occurrences of `.?AV`, `.?AU`, `??_7`), so classes can only be found structurally; string references are
+  base-relative - a new `tools/ghidra/scripts/ExportXrefs.java`, run against the cached project with `-process -noanalysis`, finds
+  neither a Ghidra reference nor a single stored dword naming the terrain diagnostic at `0x655d79` (the console command at
+  `0x650738` has one table entry, `0x664cc4`); and §12's instance-record layout matches no stride-20 section of unit `8baf540e`, so
+  the loader's in-memory form is not the stored form. The two functions that do name the diagnostic are body/navigation code.
 
 ### Fixed
 

@@ -496,3 +496,45 @@ the coarse ones, and `--walk=true` stays a Warn-level probe rather than ground t
 statistics but the one thing these measurements cannot produce - the code in `tra.exe` that builds a terrain group's vertex
 buffer as its unit loads, turning data we already parse into per-material bases. That is where Milestone 4's geometry work goes
 next [S].
+
+Three cheaper ways of reaching that code were tried and came up empty, so they are recorded here to stop repeats [V-data]:
+
+- **No RTTI and no mangled names.** The 8,777,728 bytes of `tra.exe` contain zero occurrences of `.?AV`, `.?AU` or `??_7`.
+  Class identification has to be structural; the repo's `ExportRtti.java` consequently writes an empty table.
+- **String references are base-relative.** A new export, `tools/ghidra/scripts/ExportXrefs.java` (it reuses the cached
+  project through `-process -noanalysis`, so a run costs seconds and one JVM), looked for every reference to the terrain
+  diagnostic at `0x655d79`: no Ghidra reference, and not one stored little-endian dword naming that address anywhere in the
+  image, aligned or unaligned. The console-command string at `0x650738` has exactly one - a table entry at `0x664cc4`.
+  Where Ghidra did resolve a string it inlines it as an `s_..._<addr>` symbol, so grepping the decompile for those labels
+  is the working route; grepping for the literal text is not.
+- **Instance records are not kept as a stride-20 array on disk.** Laying §12's field table over every section of unit
+  `8baf540e` whose size divides by 20 leaves no section where each record's +4 byte stays below 11, so the loader's
+  in-memory form differs from the stored one.
+
+The two functions that do name that diagnostic are `FUN_0050aa40` and `FUN_0050b840`; reading the second shows body and
+navigation bookkeeping - a linked list of bodies, fixed 32-entry node arrays, per-body radius scaling - and no strip walk
+[V]. What §17 needs is interactive work in the disassembly: create functions at the handler slots, apply structures, follow
+xrefs from there. More grep will not produce it.
+
+## 18. An edge-length gate removes the gross chains and still certifies nothing, measured [V-data] [V-gpu]
+
+`--strips=true` draws the strip chains reached from every terrain tree's leaf references and gates what reaches the screen with
+the rule §17 uses to score a base: non-degenerate (shortest edge over 1 unit) and longest edge under 1,000 world units. Two runs
+over `8baf540e` section 0 measure how little that rule discriminates:
+
+1. **Halving the threshold barely changes what is drawn.** At 2,000 units the gate stopped 13,130 triangles; at 1,000 units it
+   stopped 16,462 of the 135,914 sampled - 119,452 drawn over 149,077 vertices, reached from 4,776 strip records through 1,620
+   leaf references, with 0 bad heads and 100 broken links [V-data]. Only 3,332 more triangles fall out when the bar moves by a
+   factor of two, so most chains that look wrong on screen have every edge comfortably inside the limit.
+2. **Because section 0 is dense.** Its measured bounds are 3,282 x 2,447 x 1,640 world units holding 149,077 vertices, which puts
+   the mean volume per vertex at 88 thousand cubic units and a nearest-neighbour scale near 45 units [V-data]. Pairing arbitrary
+   nearby vertices therefore produces short edges by accident: short edges are necessary for a correct chain, never sufficient.
+   That is also why §17's good-rate metric saturates - thousands of wrong bases score above 85 % - and why the gate belongs in
+   presentation hygiene only. It is not evidence about which chains are right, and no ranking may be built on it.
+3. **On screen the picture matches that reading.** With a perspective frustum (`--fov=55`) at fixed yaw/pitch/zoom, the window
+   shows one large dark triangulated sheet, holes exactly where gated chains were dropped, and bright fans of near-degenerate
+   triangles; nothing reads as a level [V-gpu]. Milestone 4's "recognizable scene" bar is not met by strip walking alone.
+
+The conclusion is §17's, now with the render path confirming it: what is missing is not a better statistic but `tra.exe`'s own
+terrain vertex-buffer build, which turns these payloads into per-material bases. Until that code is read, strip chains stay an
+honest Warn-level probe and every image drawn from them is labelled unverified.
