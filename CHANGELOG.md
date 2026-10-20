@@ -122,6 +122,15 @@ zero version and has no releases yet.
   of bytes, because this session's compositor remaps window pixels (no window pixel equalled a shipped byte exactly).
   Validation reports nothing beyond the host's stale loader entries [V-gpu].
 
+- Type-7 sections characterised over the whole install (`docs/formats/GEOMETRY.md` §7): 37,871 sections in 1,086 of the
+  1,098 version-14 units, 13,196,830 bytes, sizes 4 to 368,400 B with 53.7% exactly 48 B. The directory `id` is a key:
+  8,458 distinct ids, each holding one payload size archive-wide (id `0x6d1`: 128 B in 192 units) and unique within a unit,
+  with payloads of a class byte-identical between units. Contents are either records carrying an ASCII resource path
+  (`Event_triggered\time_bend_03.`) or float-bearing blobs without a uniform stride - never vertex arrays - and the slot-7
+  handler in `tra.exe` (`FUN_005bc830`, vtable `PTR_FUN_00657338`) keeps them in a 32,768-slot refcounted cache (block of
+  `size + 0x10`, u16 refcount at +0, data at +0x10). Type 7 is shared resource instances, not model geometry; the handler
+  table itself resolves as `DAT_0088e2b0 + type*4` with slot 5 being the texture handler.
+
 ### Fixed
 
 - Teardown order on early-exit paths (Vulkan init failure, self-check failure): the SDL window and video subsystem were
@@ -143,6 +152,6 @@ zero version and has no releases yet.
 
 ### Not yet implemented
 
-- Geometry beyond textures: the type-7 section layout, vertex and index buffers, materials, transforms and camera
-  controls (Milestone 4).
+- Geometry beyond textures: model vertex and index buffers (level-unit type-0 runs draw, §6 above), materials, transforms
+  and camera controls; the type-10 payloads of a level unit are still uncharacterised (Milestone 4).
 - Gameplay systems, level streaming, audio and cinematics (Milestones 5-6), plus any distribution work (Milestone 8).

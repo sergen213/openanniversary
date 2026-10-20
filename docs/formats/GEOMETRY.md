@@ -80,9 +80,11 @@ references above plus the `id` field of type-5 sections), and what the 20 type-1
 
 Next evidence, in order of directness:
 
-1. Decompile the per-type handler objects reached from the loader's handler table (`DAT_0088e2b0`; case 5 of
-   `FUN_005bca80` calls `handler + 0x10` after relocations are applied [V-exe]) and find the loop that walks a vertex
-   base with stride `0x14`. That gives record order, index encoding and the oct-tree walk for free.
+1. Decompile the per-type handler objects reached from the loader's handler table `DAT_0088e2b0`, indexed by a
+   directory entry's type byte as `table + type*4`; registration in `FUN_005bd980` assigns one object per slot and case 5
+   of `FUN_005bca80` calls `handler + 0x10` after relocations are applied [V-exe]. Slot 7 is resolved (the shared-instance
+   cache of §7 - not geometry), so the loop that walks a vertex base with stride `0x14` has to come from the handlers for
+   types 0 and 2 (`DAT_0088e2b0`, `DAT_0088e2b8`). That gives record order, index encoding and the oct-tree walk for free.
 2. Cross-check against the community level viewer's claims — 0xB0-byte oct-tree nodes, triangle ranges per material via
    `vbBaseOffset`/`polygonStart`/`polygonCount`, model header fields `_octTreeCount` at +0x14 and `_vertexStart` at
    +0x44 [S]. Those numbers come from a tool for *Legend*; Anniversary's own units must reproduce them before they are
@@ -121,3 +123,49 @@ exposing the order), how the modulate bytes combine with textures, or that secti
 is deliberately flat-shaded (`flat` in `shaders/mesh.vert` and `mesh.frag`): no material found so far ties those bytes to
 an interpolation rule (§5), and a flat colour makes every pixel of a triangle one shipped byte, which is what turns the
 probe into an exact check rather than "close enough". Smooth vertex colouring waits for evidence that says so.
+
+## 7. Type-7 sections are shared resource records, not geometry [V-data] [V-exe]
+
+Running the `CONTAINERS.md` §8 scan loop but keeping each unit's type-7 directory rows gives one row per section
+(columns: unit, section index, size, id):
+
+```sh
+oa-asset "<install>" list | awk '{gsub(/specMask=/,"",$5); print $1,$5}' > recs.txt
+while read -r h m; do
+    oa-asset "<install>" drm --hash "$h" --mask "$m" 2>/dev/null \
+        | awk -v u="$h" '$2==7 {printf "%s\t%s\t%s\t%s\n", u, $1, $3, $4}'
+done < recs.txt > t7.tsv          # 37,871 rows in this install
+```
+
+**37,871 type-7 sections across 1,086 of the install's 1,098 version-14 units**, 13,196,830 bytes total. Sizes span
+4 to 368,400 B over 347 distinct values; 53.7% (20,351) are exactly 48 B, then 128×1,616, 16×1,524, 32×784, 4×754,
+77×574, 164×547, 7,376×525. A unit holds 1-8 of them (mode 4). Only 94.2% of sizes are multiples of 4, so the class is
+not a single record array.
+
+The `id` column is a key, not a per-instance counter: **8,458 distinct ids**, each with exactly one payload size
+archive-wide (id `0x6d1`: 128 B in 192 units; id `0xf0`: 7,376 B in 153), and inside a unit every type-7 id is
+different. Payloads of one class are byte-identical between units - md5 over samples of the 94,260 / 7,376 / 77 / 48 B
+classes collapses them into single groups **[V-data]**.
+
+Two content shapes sit in that one type:
+
+- name-bearing records - u32 fields followed by an ASCII resource path stored inside the payload; the 77-byte class ends
+  with `Event_triggered\time_bend_03.`;
+- float-bearing blobs (94,260 / 7,376 / 368,400 B) holding values such as `1.0f`, `-1.0f` and `5.0f`, but with no uniform
+  record stride: over both tested blobs the gcd of word gaps between `0x3f800000` occurrences is 1, so they are not plain
+  vertex or matrix arrays **[V-data]**.
+
+Field table for the dominant 48 B class, twelve payloads with distinct ids: words 0, 3, 4, 8, 9 and 11 are zero or nearly
+so; word 1 is the only per-id value (descending `0x300`, `0x2ff`, `0x2fe`, ...); words 2, 5 and 6 carry template
+constants (`0x04007f64`, `0x3f800000`, `0x7f51f032`).
+
+The executable explains the sharing. Slot 7 of the handler table (`DAT_0088e2cc`) is built by `FUN_005bc830`, which sets
+vtable `PTR_FUN_00657338` and clears a static array of `0x8000` dwords at `DAT_0086e2a8`. Its methods use that array as a
+keyed cache: the acquire path allocates `size + 0x10`, stores the block in slot `key`, writes a refcount u16 at +0 (the
+release path decrements it and frees on zero), a second u16 field at +2 whose source the decompiler lost, and an in-use
+byte at +4; lookup hands back `block + 0x10` only while that byte is clear. Type-7 payloads are therefore shared
+refcounted instances, one per id - which accounts for both the fixed size per id and the identical bytes across units
+**[V-exe]**.
+
+Consequence for §5: the mesh drawn in §6 comes from a level unit's type-0 payload, so type 7 is not where model geometry
+hides. Type 10 of a level unit (20 payloads, largest 489,252 B) is still uncharacterised.

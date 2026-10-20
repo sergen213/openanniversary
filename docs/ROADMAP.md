@@ -18,10 +18,11 @@ acceptance evidence exists in this repository; otherwise it says what is missing
 
 1. Geometry inside units is still a layout gap, not a container gap: an unindexed run of stride-20 records already draws
    (`docs/formats/GEOMETRY.md` §6), but how a model's triangles index those records and where its oct-tree nodes sit is
-   unknown, as is what the type-7/type-10 payloads hold. Next
-   step is decompiling the per-type handler objects reached from `tra.exe`'s loader table `DAT_0088e2b0`. Licensing note
-   stands: Yura's `DrmFile` (GPL-3.0, version 14 only) may be consulted for structure but its code cannot be copied into
-   this GPL-3.0-or-later tree without matching terms - decide licensing before reading it in detail.
+   unknown, as is what the type-10 payloads hold. Type 7 is characterised: shared refcounted resource records keyed by
+   section id - script/event entries with embedded paths plus float-bearing blobs - and not geometry (§7). Next step is
+   decompiling the handler objects for types 0 and 2 in `tra.exe`'s loader table `DAT_0088e2b0`. Licensing note stands:
+   Yura's `DrmFile` (GPL-3.0, version 14 only) may be consulted for structure but its code cannot be copied into this
+   GPL-3.0-or-later tree without matching terms - decide licensing before reading it in detail.
 2. The five language-flavoured `specMask` groups (≈333 records each) are unconfirmed: identify by extracting one of
    each and comparing content, not by mask arithmetic.
 3. ~3,350 archive records still have no name candidate; textures (`.raw`), sound (`.mul`) and movies (`.bik`/`.sch`)
