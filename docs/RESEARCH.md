@@ -63,10 +63,11 @@ than Legend's.
 
 Ours [V-data]: in `pc-w\lara.drm` every type-5 section starts with ASCII `PCD9`, and the first such block at file offset
 `0x92b8` continues with `44 58 54 31` ("DXT1") — the magic family carries **texture** payloads, not only meshes.
-`tra.exe` agrees on textures: `FUN_0060c430` compares the first dword with `0x39444350`, fatal-errors with "Corrupt
-texture data passed into…", then reads fields at +0x10, +0x12, +0x15 (format), +0x16 [V-exe]. So the tag after the magic
-selects payload kind per engine generation: measure it per section type instead of assuming one layout. Mesh-section
-numbering stays open (`docs/formats/DRM.md` §4).
+`tra.exe` agrees on textures: `FUN_0060c430` compares the first dword with `0x39444350`, fatal-errors with "Corrupt texture
+data passed into…", then reads width at +0x10, height at +0x12 and the mip count as byte +0x15 plus one [V-exe]. The dword
+after the magic is a per-payload format tag — `'DXT1'`, `'DXT5'` or `0x15` across the 71 texture sections of `lara.drm` — so
+ZenHAX's "version 21" bytes are that tag, not a file version [V-data] (`docs/formats/TEXTURES.md`). Mesh-section numbering
+stays open (`docs/formats/DRM.md` §4).
 
 ## 5. `tra.exe` binary inventory **[V-data]**
 

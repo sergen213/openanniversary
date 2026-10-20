@@ -24,7 +24,7 @@ find_package(SDL3 REQUIRED CONFIG)
 find_package(Vulkan REQUIRED)
 
 # cdc container layer: bigfile archives of the Legend-era engine (docs/formats/CONTAINERS.md).
-add_library(oa_cdc STATIC src/cdc/Bigfile.cpp src/cdc/Drm.cpp)
+add_library(oa_cdc STATIC src/cdc/Bigfile.cpp src/cdc/Drm.cpp src/cdc/Texture.cpp)
 target_include_directories(oa_cdc PUBLIC src)
 target_link_libraries(oa_cdc PUBLIC ZLIB::ZLIB)
 
@@ -49,7 +49,7 @@ target_link_libraries(oa-game PRIVATE oa_render oa_cdc)
 if(OA_BUILD_TESTS)
   enable_testing()
   find_package(GTest REQUIRED)
-  add_executable(oa_tests tests/test_bigfile.cpp tests/test_core.cpp tests/test_drm.cpp)
+  add_executable(oa_tests tests/test_bigfile.cpp tests/test_core.cpp tests/test_drm.cpp tests/test_texture.cpp)
   target_link_libraries(oa_tests PRIVATE oa_cdc oa_core GTest::gtest_main)
   include(GoogleTest)
   gtest_discover_tests(oa_tests)

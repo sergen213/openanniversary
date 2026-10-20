@@ -13,14 +13,21 @@ zero version and has no releases yet.
   hashing (poly `0x04C11DB7`, init/final `0xFFFFFFFF`, non-reflected), sector/part addressing with the
   Legend/Anniversary alignment `0x9600000`, specialisation-mask record selection, zlib and raw-deflate inflation for
   compressed records, and reads that straddle a part boundary.
-- `oa-asset` subcommands `list`, `hash`, `resolve <paths.txt>`, `extract --path|--hash [--mask]` and
-  `drm --path|--hash [--section N --out FILE]`.
+- `oa-asset` subcommands `list`, `hash`, `resolve <paths.txt>`, `extract --path|--hash [--mask]`,
+  `drm --path|--hash [--section N --out FILE]` and `texture --path|--hash [--section N] --out FILE.png`.
 - DRM v14 unit parser (`src/cdc/Drm.*`): section directory, per-section payload offsets and 8-byte relocation pairs,
   refusing instead of guessing when the walk does not close at end-of-image, when block A does not fit, or when a
   texture section misses its `PCD9` magic. Resolved on the way: the trailing size-0 type-32 table entry is **not** a
   relocation count - reading it as one over-consumes `generalbank.drm` by 56 bytes and `uigeneral.drm` by 32, which
   is also what made both files look like they "drifted" earlier (`docs/formats/DRM.md` §2.1). Five new unit tests on
   synthetic units; real-unit verification recorded in `docs/TESTING.md` §3.
+- PCD9 texture parser (`src/cdc/Texture.*`) with mip-chain validation, and `oa-asset texture`, which decodes mip 0 for the
+  eye (BC1/BC3 CPU decode plus a small zlib PNG writer). Measured across all 71 type-5 sections of `lara.drm`: format tag at
+  +4 (`DXT1` / `DXT5` / `0x15`), payload length at +8, extent at +16/+18, bits-per-pixel at +20, levels-1 at +21 and a usage
+  word at +22; every chain total is byte-exact once the two smallest levels of a 512-wide DXT1 chain count as one block each.
+  Tag `0x15` sections are RGBA masks whose RGB is constant white with the shape in alpha, and DXT5 section 7 carries colour in
+  only five of its 5463 blocks. Section 0 decodes to Lara's clothing atlas. New page `docs/formats/TEXTURES.md`; six unit
+  tests carry that unit's numbers without shipping its bytes.
 - Startup plumbing: one-line UTC log records filtered by level (`src/core/Log.*`) and three-layer key/value
   configuration, defaults < file < `--key=value` command line (`src/core/Config.*`).
 - Native front end (Milestone 2): SDL3 window with close/Escape handling and keyboard state (`src/platform/Window.*`),
@@ -31,7 +38,7 @@ zero version and has no releases yet.
   `--selfCheck=true` which clears an offscreen image, copies it back through a host-visible buffer and compares every
   pixel against the clear colour within one byte.
 - Documentation: `README.md`, `docs/ENVIRONMENT.md`, `docs/ARCHITECTURE.md`, `docs/formats/CONTAINERS.md`,
-  `docs/EXISTING_PROJECT_AUDIT.md`, `docs/ROADMAP.md`, `docs/formats/DRM.md`.
+  `docs/EXISTING_PROJECT_AUDIT.md`, `docs/ROADMAP.md`, `docs/formats/DRM.md`, `docs/formats/TEXTURES.md`.
 - `scripts/ci.sh`: the canonical pipeline — plain unit-test run, renderer smoke on a real Wayland session or under Xvfb
   (exit 77 skip when nothing can present), then the same suite built with `-DOA_SANITIZE=ON`. `.github/workflows/native.yml`
   mirrors it and pins SDL3 to tag `release-3.2.0`; the workflow has never executed because this repository has no remote.

@@ -62,12 +62,19 @@ G="/mnt/2nd4TB/TombRaiderAnniversary/Tomb Raider Anniversary"
 ./build/oa-asset "$G" extract --path 'pc-w\lara.drm' --out /tmp/oascan/lara.drm
 ./build/oa-asset "$G" drm --path 'pc-w\uigeneral.drm'      # unit directory, payload base, anchor check
 ./build/oa-asset "$G" drm --hash 187BB04C                  # any record; non-DRM records are refused by version
+./build/oa-asset "$G" texture --path 'pc-w\lara.drm' --section 0 --out /tmp/oascan/tex0.png   # BC1 -> PNG
+./build/oa-asset "$G" texture --path 'pc-w\lara.drm' --section 9 --out /tmp/oascan/tex9.png   # tag 0x15 mask, RGBA
 ```
 
 Measured here: the six units of `docs/formats/DRM.md` parse (lara 1712 sections with 71 texture anchors, uigeneral
 155/25, generalbank 247/1), and a 90-hash sample through the same command yields 35 v14 units whose every `PCD9`
 anchor verified, while the rest are refused as "unsupported DRM version 44100"/"version 0" (those records are not
 unit archives) or reported unmatched at the default spec mask.
+
+Textures (`docs/formats/TEXTURES.md`): all 71 type-5 sections of `lara.drm` satisfy the PCD9 header and mip-chain rule —
+section 0 decodes to a recognisable clothing atlas (blue top, gloves, belt buckle), section 9 is an RGBA mask whose RGB is
+constant white with the shape carried in alpha, and DXT5 section 7 has 5463 blocks of which only five carry colour bytes.
+Note that this tool parses every number as hexadecimal, so `--section 12` selects unit section 18.
 
 Extraction only ever opens files `"rb"`; output goes to a scratch directory outside the install and this repository.
 Re-runs must produce byte-identical payloads (`cmp` against a previous extraction) before a parser change is trusted.

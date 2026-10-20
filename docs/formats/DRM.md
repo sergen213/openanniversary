@@ -66,11 +66,12 @@ v14 units; the other three have no type-5 section to anchor on) [V-data]. Implem
 
 ### 2.2 Payload magic [V-data]
 
-Type-5 (texture) payloads begin with ASCII `PCD9` followed by a DXT1 encoding tag, e.g. `lara.drm` at `0x92b8`:
-`50 43 44 39 … 44 58 54 31`. `tra.exe` validates that magic and fatal-errors otherwise:
-`FUN_0060c430` (`decomp_all.c:357269`) compares the first dword with `0x39444350` and calls
-`FUN_005df730("Corrupt texture data passed into…")`, then reads width/height/format fields at +0x10, +0x12, +0x15, +0x16
-[V-exe]. Those offsets are the starting point for `docs/formats/TEXTURES.md` (not yet written).
+Type-5 (texture) payloads begin with ASCII `PCD9` followed by a format tag — `'DXT1'`, `'DXT5'` or `0x15` in the units
+measured so far — e.g. `lara.drm` at file offset `0x92b8`: `50 43 44 39 … 44 58 54 31`. `tra.exe` validates that magic and
+fatal-errors otherwise: `FUN_0060c430` (`decomp_all.c:357269`) compares the first dword with `0x39444350`, calls
+`FUN_005df730("Corrupt texture data passed into…")`, then reads width/height/mip count at +0x10, +0x12 and byte +0x15
+[V-exe]. The full header and mip-chain rule are worked out in `docs/formats/TEXTURES.md`; `parsePcd9`
+(`src/cdc/Texture.cpp`) enforces them and refuses a level count that disagrees with the payload length.
 
 ## 3. Region between the section table and the first payload [V-data]
 
@@ -117,5 +118,6 @@ has that size; it no longer blocks parsing.
   not reach end-of-image, a pre-payload region smaller than the header's block A, or a type-5 section
   whose payload does not start with `PCD9`. Verified through `oa-asset drm` on the six units above and
   on 35 sampled records; records that are not DRM units are rejected by version (e.g. `44100`).
-* Geometry comes from type-7/type-2 sections of `lara.drm`; textures from type 5 (`PCD9`/DXT1). Both are
-  reachable with this parser, so Milestone 4 is unblocked by this page even with §4.1 open.
+* Textures come from type 5 and are parsed and decoded per `docs/formats/TEXTURES.md` (`src/cdc/Texture.cpp`, exposed by
+  `oa-asset texture`). Geometry comes from the 851 type-7 sections of `lara.drm`: this parser already reaches every payload,
+  so Milestone 4 is now gated on the geometry layout (§4.1) and nothing else in the container path.
