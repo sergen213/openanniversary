@@ -293,3 +293,29 @@ parser. The generic path itself shows in `FUN_005bca80`'s default branch: a reco
 `count * 0x14`, and a word-by-word copy over the payload in stride-20 steps **[V]**. Consequence for §10's open questions:
 leaf-to-record linkage is decided by game code after loading, so the next place to look is the terrain-group constructor
 among the callers of that generic handler, not the section dispatch itself.
+
+## 12. Handler vtables read from `.rdata`, and what the stride-20 record really is, measured [V]
+
+`tra.exe` ships only two PE sections (`.rsrc` covering `0x1000-0x85f000`, `.idata`), so every virtual address maps as
+`file = 0x200 + (va - 0x401000)`; reading dwords there gives the handler objects §11 named. Each handler vtable is twelve
+slots, tables laid out back to back: type 1 at `0x657414`, types 0/4/10 at `0x657444` (`FUN_005bc880`, `FUN_00498bc0`,
+`FUN_005bc8d0`, `FUN_005bc8a0`, …), type 2 at `0x657474` (`FUN_005bc580`, `FUN_00498bc0`, `FUN_005bc5b0`, `FUN_005bc5c0`,
+…), type 9 at `0x6574a4` (`FUN_005be350`, …) **[V]**. Most of those eight functions were not analysed by the earlier Ghidra
+pass, so they are now dumped as per-function files in `openanniversary-work/ghidra/decomp` (the repo's
+`tools/ghidra/scripts/DecompileFunctions.java` creates a function at an address when none exists).
+
+What the type-0 and type-2 slots do contains no geometry interpretation: slot +0 is `FUN_005bc880`, which releases the
+payload buffer through allocator vtable slot `+0x34`; slot +C is a plain word-at-a-time copy into the object buffer
+(`FUN_005bc8a0`), and type 2's version copies into a static twelve-byte-per-entry table at `DAT_0084d41c[idx*3]`
+(both `FUN_005bc5c0`) **[V]**. So the container layer never walks indices - it allocates, copies and frees bytes; which is
+exactly why a level unit's payloads look like flat arrays to our parser.
+
+The stride-20 walk in `FUN_005bca80`'s default branch (the object-instance loader: the version check quotes
+`Wrong mkloadob version data %x, c=%x`) is therefore about *instance* records, and its own arithmetic names their fields: a
+u32 key at +0, a resource-type byte at +4 that indexes `DAT_0088e2b0 + type*4`, a flag byte at +5 whose bit 0 marks an
+already-merged record, a u16 argument at +6 handed to handler slot +0, a u32 grouping id at +C used by slot +4 to match
+records that share one object, and a u32 mask at +0x10 tested against the unit's flag set **[V]**. Resolved handles are
+written out as eight-byte entries: u32 handle plus u16 resource type (`iVar19 += 8`, `*(ushort *)(base + 4) = type`)
+**[V]**. Those records are not terrain vertices - nothing in this path reads a u16 index array - so §10's strip indices stay
+a game-code concern, read straight from the record body as prior art's `TerrainTextureStripInfo.stripVertex[1]` suggests
+**[S]**.

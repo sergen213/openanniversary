@@ -45,6 +45,10 @@ public class DecompileFunctions extends GhidraScript {
         Set<Function> funcs = new LinkedHashSet<>();
         for (String s : sel) {
             Function f = resolve(s);
+            if (f == null && s.matches("(0x)?[0-9a-fA-F]{6,8}")) {
+                // vtable targets Ghidra never turned into functions get one at the exact entry.
+                f = createFunction(toAddr(Long.parseLong(s.replaceFirst("^0x", ""), 16)), null);
+            }
             if (f == null) {
                 printerr("DecompileFunctions: no function for '" + s + "'");
             }

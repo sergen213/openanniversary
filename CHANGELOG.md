@@ -153,6 +153,17 @@ zero version and has no releases yet.
 - Leaf-addend header probe over unit `8baf540e` section 86 (`docs/formats/GEOMETRY.md` §10): a record header parses cleanly at
   only **50 of 533** leaf addends, and the ones that do parse chain normally (target 183, addend 0: vertexCount 384, matIdx 75,
   nextTexture 0x32C), so the record form is confirmed while leaf-to-record linkage stays unresolved.
+- Handler vtables read out of `tra.exe` itself and the stride-20 record fields named (`docs/formats/GEOMETRY.md` §12): the PE
+  has two sections, so a virtual address maps as `0x200 + va - 0x401000`; twelve-slot handler vtables lie back to back at
+  `0x657414`, `0x657444` (types 0/4/10), `0x657474` (type 2) and `0x6574a4`. The type-0 handler's slots +0/+C are a payload
+  free (`FUN_005bc880`) and a word-at-a-time copy into the object buffer (`FUN_005bc8a0`), and type 2 copies into the static
+  table `DAT_0084d41c[idx*3]` - the container layer allocates, copies and frees; it interprets nothing. The stride-0x14 walk
+  belongs to the object-instance loader (`FUN_005bca80`, whose version check quotes `Wrong mkloadob version data %x, c=%x`)
+  and names instance fields instead: key u32 at +0, resource-type byte at +4 that indexes `DAT_0088e2b0 + type*4`, flag byte
+  at +5 with bit 0 marking merged records, a u16 argument at +6, a grouping id u32 at +C and a mask u32 at +0x10; resolved
+  handles leave as eight-byte {u32 handle, u16 type} entries. Eight of those functions were absent from the earlier Ghidra
+  export, so `tools/ghidra/scripts/DecompileFunctions.java` now creates a function at an address when none exists and they
+  were re-exported into `openanniversary-work/ghidra/decomp`.
 
 ### Fixed
 
