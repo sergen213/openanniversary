@@ -1,6 +1,7 @@
 #include "cdc/Drm.hpp"
 
 #include <cstdio>
+#include <algorithm>
 #include <cstdint>
 #include <utility>
 
@@ -78,8 +79,13 @@ bool DrmFile::parse(std::span<const std::byte> image, DrmFile* out, std::string*
     }
 
     // The archive stores relocation table then payload per section, in table order, without padding.
-    // Subtracting that total from the image size locates the first payload; if the arithmetic does
-    // not close, the layout assumption is wrong for this unit and guessing would corrupt content.
+    // Subtracting that total from the image size locates the first payload, and every texture magic
+    // that lands on PCD9 confirms it. Level units break that arithmetic: pc-w-hash 8baf540e declares a
+    // trailing entry whose 1288 bytes are not in the image, so the subtraction shifts the base and
+    // misanchors every one of its 36 textures [V-data]. Re-solve from an actual magic and drop a suffix
+    // of table entries as unstored until the walk closes byte-exactly again.
+    const std::uint64_t kPcd9 = 0x39444350u;  // "PCD9"
+
     std::uint64_t payloadTotal = 0;
     for (const DrmSection& s : parsed.sections_) {
         payloadTotal += static_cast<std::uint64_t>(s.size) + relocBytes(s);
@@ -88,43 +94,129 @@ bool DrmFile::parse(std::span<const std::byte> image, DrmFile* out, std::string*
                         " bytes, more than the whole image");
         }
     }
-    const std::uint64_t base = static_cast<std::uint64_t>(image.size()) - payloadTotal;
-    if (base < tableEnd + parsed.header_.blockABytes) {
-        return fail("pre-payload region is " + hex(base - tableEnd) + " bytes, below the " +
-                    std::to_string(parsed.header_.blockABytes) + " bytes the header declares");
-    }
-    parsed.payloadBase_ = static_cast<std::size_t>(base);
 
-    std::uint64_t pos = base;
-    std::size_t anchored = 0;
-    for (std::size_t i = 0; i < parsed.sections_.size(); ++i) {
-        DrmSection& s = parsed.sections_[i];
-        const std::uint64_t rb = relocBytes(s);
-        s.payloadOffset = static_cast<std::size_t>(pos + rb);
-        pos += s.size + rb;
-        if (s.type == 5) {
-            ++anchored;
-            const bool magic = s.payloadOffset + 4 <= image.size() && readU32(image, s.payloadOffset) == 0x39444350u;
-            if (!magic) {
-                return fail("texture section " + std::to_string(i) + " at " + hex(s.payloadOffset) +
-                            " does not start with PCD9");
+    // Offsets of every PCD9 in the image, used as alternative anchors.
+    std::vector<std::size_t> magics;
+    for (std::size_t at = 0; at + 4 <= image.size() && magics.size() < 8192u; ++at) {
+        if (readU32(image, at) == kPcd9) magics.push_back(at);
+    }
+
+    // Places payloads and relocation tables for one candidate base, verifies every texture magic, and
+    // marks a suffix of table entries unstored so the walk ends exactly at the image end.
+    const bool hasTextureSection = std::any_of(parsed.sections_.begin(), parsed.sections_.end(),
+                                              [](const DrmSection& s) { return s.type == 5; });
+    std::string why;  // last rejection, reported when no candidate base works
+    const auto tryBase = [&](std::uint64_t base) -> bool {
+        if (base < tableEnd || base > image.size()) {
+            why = "candidate base " + hex(base) + " overlaps the section table or passes the end of the image";
+            return false;
+        }
+
+        // Close the walk against the end of the image, marking a suffix of entries unstored.
+        std::uint64_t endPos = base;
+        for (const DrmSection& s : parsed.sections_) endPos += static_cast<std::uint64_t>(s.size) + relocBytes(s);
+        std::size_t dropFrom = parsed.sections_.size();
+        while (endPos > image.size() && dropFrom > 0) {
+            --dropFrom;
+            const DrmSection& s = parsed.sections_[dropFrom];
+            endPos -= static_cast<std::uint64_t>(s.size) + relocBytes(s);
+        }
+        if (endPos != image.size()) {
+            why = "the walk from base " + hex(base) + " ends at " + hex(endPos) + ", not the end of the " +
+                  std::to_string(image.size()) + "-byte image";
+            return false;
+        }
+
+        std::size_t anchored = 0;
+        std::uint64_t pos = base;
+        for (std::size_t i = 0; i < parsed.sections_.size(); ++i) {
+            DrmSection& s = parsed.sections_[i];
+            s.stored = i < dropFrom;
+            if (!s.stored) {
+                s.payloadOffset = 0;
+                continue;
+            }
+            const std::uint64_t rb = relocBytes(s);
+            s.payloadOffset = static_cast<std::size_t>(pos + rb);
+            pos += s.size + rb;
+            if (s.type == 5) {
+                if (!(s.payloadOffset + 4 <= image.size() && readU32(image, s.payloadOffset) == kPcd9)) {
+                    why = "texture section " + std::to_string(i) + " at " + hex(s.payloadOffset) +
+                          " does not start with PCD9";
+                    return false;
+                }
+                ++anchored;
             }
         }
+        // A unit with texture payloads is validated structurally by every magic landing where the
+        // directory says, so hdr[2] cannot veto it: pc-w-hash F2197DE6 anchors all 9 of its textures and
+        // closes exactly at the image end from base 416, yet its pre-payload region is 4 bytes below the
+        // 132 bytes that field declares [V-data]. Units without any magic to anchor on still need that
+        // check, because closure alone there proves nothing about where payloads begin.
+        if (!hasTextureSection && base < tableEnd + parsed.header_.blockABytes) {
+            const auto room = static_cast<std::int64_t>(base) - static_cast<std::int64_t>(tableEnd);
+            why = "pre-payload region is " + hex(static_cast<std::uint64_t>(room)) + " bytes, below the " +
+                  std::to_string(parsed.header_.blockABytes) + " bytes the header declares";
+            return false;
+        }
+        parsed.anchored_ = anchored;
+        parsed.payloadBase_ = static_cast<std::size_t>(base);
+        return true;
+    };
+
+    // The first entry with a magic fixes the base directly: everything stored ahead of it sits at its
+    // normal distance, and that distance includes the relocation table kept before its own payload.
+    if (!tryBase(static_cast<std::uint64_t>(image.size()) - payloadTotal)) {
+        std::uint64_t rel = 0;
+        bool haveRel = false;
+        for (const DrmSection& s : parsed.sections_) {
+            rel += relocBytes(s);
+            if (s.type == 5) {
+                haveRel = true;
+                break;
+            }
+            rel += static_cast<std::uint64_t>(s.size);
+        }
+        bool solved = false;
+        for (std::size_t magic : magics) {
+            if (!haveRel || magic < rel) continue;
+            DrmFile probe = parsed;  // tryBase mutates offsets, so restart from the clean table
+            if (tryBase(magic - rel)) {
+                solved = true;
+                break;
+            }
+            parsed = probe;
+        }
+        if (!solved) {
+            return fail("no payload base anchors every texture section on PCD9 and closes the " +
+                        std::to_string(parsed.sections_.size()) + "-entry table at the end of the " +
+                        std::to_string(image.size()) + "-byte image (declared bytes " + hex(payloadTotal) +
+                        ", magics found " + std::to_string(magics.size()) + "); last reason: " + why);
+        }
     }
-    parsed.anchored_ = anchored;
     *out = std::move(parsed);
     return true;
 }
 
 std::vector<DrmReloc> DrmFile::relocations(const DrmSection& section) const {
-    const std::size_t tableStart = section.payloadOffset - relocBytes(section);
     std::vector<DrmReloc> out;
+    if (!section.stored || section.relocCount == 0) return out;
+    const std::size_t tableStart = section.payloadOffset - relocBytes(section);
     out.reserve(section.relocCount);
     for (std::uint32_t i = 0; i < section.relocCount; ++i) {
         const std::size_t at = tableStart + static_cast<std::size_t>(i) * 8u;
-        out.push_back({readU32(image_, at), readU32(image_, at + 4)});
+        const std::uint32_t word = readU32(image_, at);
+        out.push_back({static_cast<std::uint16_t>(word & 0xFFFFu), static_cast<std::uint16_t>(word >> 16u),
+                       readU32(image_, at + 4)});
     }
     return out;
+}
+
+std::uint32_t DrmFile::relocAddend(const DrmSection& section, const DrmReloc& reloc) const {
+    if (!section.stored) return 0;
+    const std::size_t at = section.payloadOffset + reloc.siteOffset;
+    if (at + 4 > image_.size()) return 0;
+    return readU32(image_, at);
 }
 
 }  // namespace oa::cdc

@@ -127,5 +127,35 @@ oa-asset "<install>" extract --path 'pc-w\lara.drm' --out /tmp/lara.drm         
 
 Both extracted units begin with `u32 14`, i.e. **DRM version 14**, the Legend/Anniversary unit format; Yura's
 `DrmFile` accepts only version 14 for TR7/TRAE **[S]** and the sister project documents Underworld's version 19
-(`hdr[0] == 0x13`) **[S]**. The unit header body (section table with `0xFFFFFFFF` terminators and an incrementing
-index) is not yet decoded; see `docs/formats/UNITS.md` when it is.
+(`hdr[0] == 0x13`) **[S]**. The unit header body is decoded in `docs/formats/DRM.md` §§1-3 and implemented in
+`src/cdc/Drm.cpp`.
+
+## 8. What the payloads are, counted across every record **[V-data]**
+
+`oa-asset drm` was run over all 4,304 records of this install (`list` output fed to `--hash`/`--mask` one record at a
+time). Grouping by verdict and leading dword:
+
+| Leading u32 | Records | Reading |
+| --- | --- | --- |
+| `14` | **1,098** | DRM v14 units. All 1,098 parse byte-exactly with every texture magic verified (`docs/formats/DRM.md` §5): 1,097 closed on plain closure or the absent-entry rule, and record `F2197DE6` needed both rules of §3 |
+| `44100`, plus `44099` (34), `44098` (5) and one each of `44097/44096/44094/44093` | 2,724 | audio streams: a sample rate in Hz at the payload start **[I]** — every value sits within a few units of 44.1 kHz |
+| `36000`, `32000`, `48000`, `22050` | 42, 32, 13, 7 | more audio streams at those rates **[I]** |
+| `0x52415721` = `"!WAR"` | 232 | an ASCII tag; role not yet established |
+| `0x2173754D` = `"Mus!"` | 73 | music-related, judged by its tag **[I]** |
+| `0` | 74 | payload begins with a zero dword; unclassified |
+| text-shaped dwords: `0x0D393439` = `"949\r"`, `0x0D333531` = `"153\r"`, `0x31207570` = `"pu 1"` | 1, 1, 1 | plain text. The `"949\r"` record is `\trae\pc-w\objectlist.txt` (hash `DD7335E5`), whose first line is that count — checked by extracting it (§6) |
+| unique one-offs (`1`, `2`, `3`, `4`, `31`, `154`, …) | 14 records, each a distinct leading dword | unclassified |
+
+Reproduce:
+
+```sh
+oa-asset "<install>" list | awk '{gsub(/specMask=/,"",$5); print $1,$5}' > recs.txt
+while read -r h m; do
+    oa-asset "<install>" drm --hash "$h" --mask "$m" >/dev/null 2>/tmp/e.txt \
+        || grep -o "unsupported DRM version [0-9]*" /tmp/e.txt | head -1
+done < recs.txt | sort | uniq -c | sort -rn
+```
+
+Consequence for the reconstruction: the container path is no longer an unknown. Every v14 unit in the install can be
+walked to its payloads; what still has no reader is geometry (`docs/formats/GEOMETRY.md` §5) and the audio/video payload
+families.

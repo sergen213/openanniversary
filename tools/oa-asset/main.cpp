@@ -397,12 +397,12 @@ int main(int argc, char** argv) {
                     static_cast<unsigned long long>(drm.payloadBase()),
                     static_cast<long long>(drm.payloadBase() - 28ull - 20ull * hdr.numSections -
                                             hdr.blockABytes));
-        std::printf("%-5s %-4s %-9s %-10s %-7s %-6s %s\n", "idx", "type", "size", "id", "relocs", "flags",
-                    "payloadOffset");
+        std::printf("%-5s %-4s %-9s %-10s %-7s %-6s %-12s %s\n", "idx", "type", "size", "id", "relocs",
+                    "flags", "stored", "payloadOffset");
         for (std::size_t i = 0; i < drm.sections().size(); ++i) {
             const auto& s = drm.sections()[i];
-            std::printf("%-5zu %-4u %-9u %-10u %-7u %-6u %zu\n", i, s.type, s.size, s.id, s.relocCount,
-                        s.flags, s.payloadOffset);
+            std::printf("%-5zu %-4u %-9u %-10u %-7u %-6u %-12s %zu\n", i, s.type, s.size, s.id, s.relocCount,
+                        s.flags, s.stored ? "yes" : "ABSENT", s.payloadOffset);
         }
         std::fprintf(stderr, "%zu sections, %zu anchor-verified texture payloads\n", drm.sections().size(),
                      drm.anchoredSections());
@@ -410,6 +410,14 @@ int main(int argc, char** argv) {
         if (opt.haveSection) {
             if (opt.section >= drm.sections().size()) return fail("section index out of range");
             const auto payload = drm.payload(drm.sections()[opt.section]);
+            for (const auto& r : drm.relocations(drm.sections()[opt.section])) {
+                std::fprintf(stderr,
+                             "reloc kind=%u target-section=%u typeSpecific=0x%04X site=0x%08llX addend=0x%08llX\n",
+                             static_cast<unsigned>(oa::cdc::relocKind(r)),
+                             static_cast<unsigned>(oa::cdc::relocSectionIndex(r)), r.typeSpecific,
+                             static_cast<unsigned long long>(r.siteOffset),
+                             static_cast<unsigned long long>(drm.relocAddend(drm.sections()[opt.section], r)));
+            }
             if (opt.out.empty()) {
                 std::fwrite(payload.data(), 1, payload.size(), stdout);
                 return 0;

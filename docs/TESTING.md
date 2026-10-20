@@ -66,10 +66,14 @@ G="/mnt/2nd4TB/TombRaiderAnniversary/Tomb Raider Anniversary"
 ./build/oa-asset "$G" texture --path 'pc-w\lara.drm' --section 9 --out /tmp/oascan/tex9.png   # tag 0x15 mask, RGBA
 ```
 
-Measured here: the six units of `docs/formats/DRM.md` parse (lara 1712 sections with 71 texture anchors, uigeneral
-155/25, generalbank 247/1), and a 90-hash sample through the same command yields 35 v14 units whose every `PCD9`
-anchor verified, while the rest are refused as "unsupported DRM version 44100"/"version 0" (those records are not
-unit archives) or reported unmatched at the default spec mask.
+Measured here: **every one of the 4,304 records** was run through `drm` - the reproduction line and the resulting payload
+census are in `docs/formats/CONTAINERS.md` §8. All **1,098 version-14 units parse byte-exactly**, including level unit
+`8baf540e` (235 sections, 92 verified texture anchors, one directory entry whose bytes the archive never stores) and record
+`F2197DE6`, whose pre-payload region is 4 bytes below the block A its header declares. The named units of
+`docs/formats/DRM.md` parse as before (lara 1712 sections / 71 anchors, uigeneral 155/25, generalbank 247/1); the remaining
+3,206 records are refused by leading dword - audio sample rates such as `44100`, the tags `!WAR` and `Mus!`, text payloads
+such as `"949\r"` (`objectlist.txt`) and 74 records starting with a zero dword. A parser change has to keep that unit count
+at 1,098 or account for the difference out loud.
 
 Textures (`docs/formats/TEXTURES.md`): all 71 type-5 sections of `lara.drm` satisfy the PCD9 header and mip-chain rule —
 section 0 decodes to a recognisable clothing atlas (blue top, gloves, belt buckle), section 9 is an RGBA mask whose RGB is
@@ -81,15 +85,25 @@ Re-runs must produce byte-identical payloads (`cmp` against a previous extractio
 
 ## 4. Renderer verification (display path)
 
-Two independent checks, because "it drew something" is not evidence:
+Four independent checks, because "it drew something" is not evidence:
 
-* **Offscreen read-back** — `oa-game --selfCheck=true`: clears an `R8G8B8A8_UNORM` image (unorm avoids the sRGB encode),
-  copies it to host-visible memory and compares every pixel with the clear colour within one byte. Exercises device
-  creation, command recording, image layout transitions and buffer read-back without depending on what is on screen.
+* **Clear read-back** — `oa-game --selfCheck=true`, phase one: clears an offscreen `R8G8B8A8_UNORM` image (unorm keeps
+  clear floats linear), copies it to host-visible memory and compares every pixel with the clear colour within one byte.
+  Exercises device creation, command recording, layout transitions and buffer read-back without what is on screen.
+* **Sampled-texture round trip** — phase two of the same run: a synthetic 16x16 `B8G8R8A8_SRGB` pattern goes through
+  `uploadTexture()` (staging copy per mip region, layout transition, combined-image-sampler descriptor), is drawn with the
+  swapchain pipeline into an offscreen attachment that is render-pass-compatible with it, and returns byte-for-byte within
+  one unit. The attachment format must equal the pipeline's colour format; the probe also pins UV orientation, because
+  row 0 of a payload has to come back as row 0 of the attachment.
 * **Presented pixels** — grab the desktop (`spectacle -b -n -o out.png`, see `docs/ENVIRONMENT.md` §"Display"), then
   *measure*: find the largest solid rectangle of the expected colour instead of a loose bounding box (other UI elements
   share the hue). For a 1600x900 window this measured exactly 1600x893 px at (1120, 649) — a few rows under the panel.
   Remember an sRGB attachment encodes clear values: linear `(0.10,0.35,0.62)` arrives as `#59A0CF`.
+* **Shipped texture on screen** — `oa-game --gameDir="<install>" --texture='pc-w\lara.drm' --selfCheck=false` uploads the
+  record's first PCD9 section (`--section N`, hexadecimal, selects another) and draws it letterboxed. In a 2240x1260
+  window the content measured from x=489 across the full drawable height - a centred 1240 px square with clear-colour bars
+  at both sides - and matches `oa-asset texture --path 'pc-w\lara.drm' --section 0` texel for texel in layout, which is
+  the cross-check between the CPU decode and the GPU upload path.
 
 Validation-layer runs must be clean apart from the host's stale `liblsfg-vk-layer.so` loader messages documented in
 `docs/ENVIRONMENT.md`; anything else is a bug to fix, not to suppress.
