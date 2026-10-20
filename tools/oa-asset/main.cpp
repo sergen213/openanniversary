@@ -495,7 +495,7 @@ int main(int argc, char** argv) {
                 headsPerSection[leaf.targetSection].push_back(leaf.offsetInTarget);
             }
             std::vector<std::uint32_t> tris;
-            std::uint32_t records = 0, heads = 0, badHeads = 0, brokenLinks = 0, snappedLinks = 0;
+            std::uint32_t records = 0, heads = 0, badHeads = 0, brokenLinks = 0;
             std::uint32_t low = vertexCount, high = 0u;
             for (const auto& entry : headsPerSection) {
                 const auto& strip = drm.sections()[entry.first];
@@ -508,7 +508,7 @@ int main(int argc, char** argv) {
                     continue;
                 }
                 records += walked.records; heads += walked.heads; badHeads += walked.badHeads;
-                brokenLinks += walked.brokenLinks; snappedLinks += walked.snappedLinks;
+                brokenLinks += walked.brokenLinks;
                 tris.insert(tris.end(), walked.indices.begin(), walked.indices.end());
             }
             std::vector<double> edges;
@@ -526,9 +526,9 @@ int main(int argc, char** argv) {
             std::size_t longEdges = 0;
             for (double e : edges) if (e > 2000.0) ++longEdges;
             std::printf("section %-4zu nodes=%-5u leaves=%-5u depth=%-3u | chains: heads=%-5u records=%-5u badHeads=%-3u "
-                        "broken=%-3u snapped=%-4u | tris=%-7zu idx %6u..%6u edge p50=%6.0f p99=%7.0f max=%8.0f over2000=%.2f%%\n",
+                        "broken=%-3u | tris=%-7zu idx %6u..%6u edge p50=%6.0f p99=%7.0f max=%8.0f over2000=%.2f%%\n",
                         i, static_cast<unsigned>(tree.nodes), static_cast<unsigned>(tree.leaves),
-                        static_cast<unsigned>(tree.maxDepth), heads, records, badHeads, brokenLinks, snappedLinks,
+                        static_cast<unsigned>(tree.maxDepth), heads, records, badHeads, brokenLinks,
                         tris.size() / 3u, low, high, percentile(0.5), percentile(0.99),
                         edges.empty() ? 0.0 : edges.back(),
                         edges.empty() ? 0.0 : 100.0 * static_cast<double>(longEdges) / static_cast<double>(edges.size()));

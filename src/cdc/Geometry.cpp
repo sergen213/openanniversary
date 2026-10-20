@@ -90,23 +90,30 @@ bool decodeTerrainStripChains(std::span<const std::byte> payload, std::span<cons
     if (out == nullptr) return fail("decodeTerrainStripChains needs an output struct");
     out->indices.clear();
     out->materialOfTriangle.clear();
-    out->heads = out->records = out->badHeads = out->brokenLinks = out->snappedLinks = 0u;
+    out->heads = out->records = out->badHeads = out->brokenLinks = 0u;
 
-    // What makes a record here is structure, not statistics: vertexCount a multiple of three within a sane range, the
-    // index run inside this payload, and every index naming a vertex of the array (GEOMETRY.md §15 measured all 4,768
-    // chain-walked records against those tests, with no 0xFFFF restart word among them).
-    const auto readRecord = [&](std::size_t at, std::uint32_t* count, std::int32_t* matIdx, std::uint32_t* next) {
+    // A header is read wherever a link points, and the chain continues while its vertexCount is non-zero - prior art's own
+    // walk, `for (strip = tsi; strip->vertexCount > 0; strip = strip->nextTexture)` (`tr7/game/pc/D3D/d3dterrain.cpp:117`).
+    // A zero count is therefore the chain end marker, not a broken record: in unit `8baf540e` chains are laid out back to
+    // back and each one's last link names such a header (section 79 at offset 0x360, whose following record starts four
+    // bytes later - reading that marker as junk is what made raw link following look like it broke everywhere) [V-data].
+    // What makes a *drawn* record real is structure: vertexCount a multiple of three within range, its index run inside
+    // this payload, and every index naming a vertex of the array (§15 measured all 4,768 chain-walked records against
+    // those tests).
+    const auto readHeader = [&](std::size_t at, std::uint32_t* count, std::int32_t* matIdx, std::uint32_t* next) {
         if (at + kHeaderBytes > payload.size()) return false;
-        const std::byte* base = payload.data() + at;
-        const std::uint32_t vertexCountHere = loadU32(base);
-        if (vertexCountHere < 3u || vertexCountHere > 8192u || vertexCountHere % 3u != 0u) return false;
-        if (at + kHeaderBytes + 2u * static_cast<std::size_t>(vertexCountHere) > payload.size()) return false;
-        for (std::uint32_t i = 0; i < vertexCountHere; ++i) {
-            if (static_cast<std::size_t>(loadU16(base + kHeaderBytes + 2u * i)) >= vertexCount) return false;
+        *count = loadU32(payload.data() + at);
+        *matIdx = static_cast<std::int32_t>(loadU32(payload.data() + at + 20u));
+        *next = loadU32(payload.data() + at + 40u);
+        return true;
+    };
+    const auto validRecord = [&](std::size_t at, std::uint32_t count) {
+        if (count < 3u || count > 8192u || count % 3u != 0u) return false;
+        if (at + kHeaderBytes + 2u * static_cast<std::size_t>(count) > payload.size()) return false;
+        const std::byte* run = payload.data() + at + kHeaderBytes;
+        for (std::uint32_t i = 0; i < count; ++i) {
+            if (static_cast<std::size_t>(loadU16(run + 2u * i)) >= vertexCount) return false;
         }
-        *count = vertexCountHere;
-        *matIdx = static_cast<std::int32_t>(loadU32(base + 20u));
-        *next = loadU32(base + 40u);
         return true;
     };
 
@@ -118,47 +125,32 @@ bool decodeTerrainStripChains(std::span<const std::byte> payload, std::span<cons
             std::uint32_t count = 0u;
             std::uint32_t next = 0u;
             std::int32_t matIdx = 0;
-            if (!readRecord(at, &count, &matIdx, &next)) {
+            if (!readHeader(at, &count, &matIdx, &next)) {
                 if (producedAny) out->brokenLinks += 1u; else out->badHeads += 1u;
                 break;
             }
-            if (std::find(walked.begin(), walked.end(), at) != walked.end()) {   // shared tail or a cycle
-                if (!producedAny) out->heads += 1u;   // this leaf's bytes are a record, drawn by another chain
+            if (count == 0u) break;   // the end-of-chain marker prior art tests for
+            if (!validRecord(at, count)) {
+                if (producedAny) out->brokenLinks += 1u; else out->badHeads += 1u;
                 break;
             }
-            walked.push_back(at);
-            producedAny = true;
-            out->records += 1u;
-            const std::byte* run = payload.data() + at + kHeaderBytes;
-            for (std::uint32_t i = 0; i + 2u < count; i += 3u) {
-                out->indices.push_back(loadU16(run + 2u * i));
-                out->indices.push_back(loadU16(run + 2u * (i + 1u)));
-                out->indices.push_back(loadU16(run + 2u * (i + 2u)));
-                out->materialOfTriangle.push_back(matIdx);
+            const bool again = std::find(walked.begin(), walked.end(), at) != walked.end();
+            if (!again) {
+                walked.push_back(at);
+                producedAny = true;
+                out->records += 1u;
+                const std::byte* run = payload.data() + at + kHeaderBytes;
+                for (std::uint32_t i = 0; i + 2u < count; i += 3u) {
+                    out->indices.push_back(loadU16(run + 2u * i));
+                    out->indices.push_back(loadU16(run + 2u * (i + 1u)));
+                    out->indices.push_back(loadU16(run + 2u * (i + 2u)));
+                    out->materialOfTriangle.push_back(matIdx);
+                }
+            } else if (!producedAny) {
+                out->heads += 1u;   // this leaf's bytes are a record, drawn by another chain
             }
-            // Chains end on a null nextTexture (prior art tr7/game/terrain.h:46); the shipped records that end a chain
-            // measured here hold 0xFFFFFFFF in that slot instead of zero, so both terminate [V-data].
-            if (next == 0u || next == 0xFFFFFFFFu) break;
-            // A link naming a valid header is used exactly as stored. The file form pads record runs to keep headers on
-            // an even byte and patches these slots through relocations, which leaves part of them short of the header they
-            // mean: measured over unit `8baf540e`'s strip payloads, 139 of 750 links name a spot exactly four bytes before
-            // the record that follows it (docs/formats/GEOMETRY.md §16). Stepping forward to a real header is allowed - up
-            // to two words, and only when the bytes there pass every record test. Anything else ends the chain.
-            bool linked = false;
-            for (std::size_t extra = 0u; extra <= 8u; extra += 4u) {
-                const std::size_t candidate = static_cast<std::size_t>(next) + extra;
-                std::uint32_t linkCount = 0u, linkNext = 0u;
-                std::int32_t linkMat = 0;
-                if (!readRecord(candidate, &linkCount, &linkMat, &linkNext)) continue;
-                if (extra != 0u) out->snappedLinks += 1u;
-                at = candidate;
-                linked = true;
-                break;
-            }
-            if (!linked) {
-                out->brokenLinks += 1u;
-                break;
-            }
+            if (again || at == static_cast<std::size_t>(next)) break;   // shared tail, cycle or self link
+            at = next;
         }
         if (producedAny) out->heads += 1u;
     }

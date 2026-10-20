@@ -204,6 +204,13 @@ zero version and has no releases yet.
   which is why `--walk=true` logs at Warn level that these heights measure the decode rather than shipped ground.
   `oa-asset <install> terrain --hash 8BAF540E` reproduces every figure above, and `scripts/ci.sh` passes both game flags whenever
   `OA_GAME_DIR` is set.
+- Why a per-material vertex base cannot be recovered from the file alone (`docs/formats/GEOMETRY.md` §17, unit `8baf540e`): the
+  offsets that make coarse records short appear nowhere in any stored payload and only one relocation entry names section 0; with
+  an honest triangle-quality measure (non-degenerate, all edges under 1,000 units) 89 of 287 material groups are already above 85%
+  good at base 0 while the rest tie across hundreds to tens of thousands of candidate bases (section 215: 0% at base 0, best 97%
+  with 22,328 tied); and a per-tree concatenation model gives overlapping spans. The median-longest-edge criterion used earlier
+  rewarded degenerate reads - thousands of bases score 0.0 under it. Closing Milestone 4's geometry needs `tra.exe`'s terrain
+  vertex-buffer build, not another search [V-data].
 
 ### Fixed
 
@@ -223,6 +230,12 @@ zero version and has no releases yet.
   nonexistent `mipLodMaxLevel` next to the real `maxLod`.
 - The graphics pipeline was never rebuilt after swapchain recreation, so a resize left the frame loop without one; it is
   recreated together with its render pass. `VkDescriptorSetLayout` leaked until `vkDestroyDevice`.
+- Chain end in `decodeTerrainStripChains()`: a link is followed as stored and the chain ends when the header reached has
+  `vertexCount == 0`, which is prior art's own loop condition (`tr7/game/pc/D3D/d3dterrain.cpp:117`). The walker had stepped short
+  links forward by up to two words onto any plausible-looking header, walking through those markers and merging neighbouring
+  chains; records, triangles and reached vertices on unit `8baf540e` are unchanged (broken links 42 to 41 in section 77), so the
+  steps never brought in geometry a leaf reference did not already reach. The counter for them (`snappedLinks`) is gone along with
+  its prints in `oa-asset terrain` and `oa-game --strips=true` (`docs/formats/GEOMETRY.md` §16, table reprinted).
 
 ### Removed
 

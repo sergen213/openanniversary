@@ -88,20 +88,18 @@ bool decodeTerrainOctree(std::span<const std::byte> payload,
 // Terrain strip records inside a type-0 payload (GEOMETRY.md §10, §15), matching cdcEngine tr7's
 // `TerrainTextureStripInfo` (`tr7/game/terrain.h:46`): a 44-byte header with vertexCount i32 at +0, vmoObjectIndex i32
 // at +4 (measured -1 in every record these chains reach [V-data]), matIdx i32 at +20 and nextTexture u32 at +40, then
-// `vertexCount` little-endian u16 indices into the unit's stride-20 vertex array. nextTexture is a byte offset inside
-// the *same* payload naming the next record - its relocation entry names this very section (see `relocSectionIndex`) -
-// and a null or 0xFFFFFFFF value ends the chain (prior art's `for (strip = tsi; strip->vertexCount > 0;` walk stops on
-// either; the shipped records that end one hold 0xFFFFFFFF in this slot [V-data]).
+// `vertexCount` little-endian u16 indices into the unit's stride-20 vertex array. nextTexture is a byte offset inside the
+// *same* payload naming the next record - its relocation entry names this very section (see `relocSectionIndex`) - and the
+// walk continues while the header reached has a non-zero vertexCount, which is prior art's own loop condition
+// (`tr7/game/pc/D3D/d3dterrain.cpp:117`). In unit `8baf540e` chains lie back to back inside one payload and each chain's last
+// link names a zero-count marker header; the following chain starts four bytes later, at the offset that marker would reach
+// if its own count were non-zero (§16).
 //
-// Chains are entered only from an oct-tree leaf reference (`decodeTerrainOctree`), never by scanning for header-shaped
-// byte patterns: a scan over unit `8baf540e` admits thousands of starts that sit inside another record's index run, and
-// those, not the shipped data, are what §13's long triangles and §14's 25,832 dropped slivers came from [V-data]. What a
-// chain walk keeps is structural - `vertexCount` in 3..8192 and a multiple of three (measured for all 4,768 records the
-// leaves reach), the run inside the payload, every index naming a vertex this array holds (a real run contains no 0xFFFF
-// restart word: §9's sentinels were scan artefacts [V-data]) - and each record is emitted once however many leaves reach it.
-// A link can name a spot four to eight bytes short of the record it means - the file form pads runs and patches these
-// slots by relocation, and §16 measured 139 of 750 links in unit `8baf540e` sitting exactly four bytes early. Such a link
-// steps forward onto a header that passes every test above and counts the step; one that names nothing valid ends the chain.
+// Chains are entered only from an oct-tree leaf reference (`decodeTerrainOctree`), never by scanning for header-shaped byte
+// patterns: a scan over unit `8baf540e` admits thousands of starts sitting inside another record's index run, and those - not
+// the shipped data - are what §13's census and §14's long joins were mixed with [V-data]. What a chain walk keeps is
+// structural: `vertexCount` in 3..8192 and a multiple of three (measured for every record the leaves reach), the run inside
+// this payload, every index naming a vertex this array holds, and each record emitted once however many leaves reach it.
 struct TerrainStripChain {
     std::vector<std::uint32_t> indices;             // triangle list: three per triangle, run order kept
     std::vector<std::int32_t> materialOfTriangle;   // one matIdx per triangle, same order
@@ -109,7 +107,6 @@ struct TerrainStripChain {
     std::uint32_t records = 0;      // distinct records walked across all chains
     std::uint32_t badHeads = 0;     // leaf references whose bytes are not a record
     std::uint32_t brokenLinks = 0;  // nextTexture values that do not name another record here
-    std::uint32_t snappedLinks = 0;  // links stepped forward by up to two words onto a real record header
 };
 
 // `heads` are the record offsets an oct-tree's leaves resolve to inside this payload, `vertexCount` is the size of the

@@ -295,7 +295,6 @@ int main(int argc, char** argv) {
             std::uint32_t heads = 0;
             std::uint32_t badHeads = 0;
             std::uint32_t brokenLinks = 0;
-            std::uint32_t snappedLinks = 0;
             for (std::size_t i = 0; i < drm.sections().size(); ++i) {
                 const oa::cdc::DrmSection& nodeSection = drm.sections()[i];
                 if (!nodeSection.stored || nodeSection.relocCount == 0) continue;
@@ -329,14 +328,12 @@ int main(int argc, char** argv) {
                     heads += walked.heads;
                     badHeads += walked.badHeads;
                     brokenLinks += walked.brokenLinks;
-                    snappedLinks += walked.snappedLinks;
                     stripIndices.insert(stripIndices.end(), walked.indices.begin(), walked.indices.end());
                 }
             }
             OA_LOG(oa::LogLevel::Info, "app", "{} terrain tree(s): {} leaf reference(s) reached {} record(s), drawing "
-                                              "{} triangle(s) over {} vertex/vertices; {} bad head(s), {} broken link(s), "
-                                              "{} link(s) stepped onto their record",
-                   trees, heads, records, stripIndices.size() / 3u, vertices.size(), badHeads, brokenLinks, snappedLinks);
+                                              "{} triangle(s) over {} vertex/vertices; {} bad head(s), {} broken link(s)",
+                   trees, heads, records, stripIndices.size() / 3u, vertices.size(), badHeads, brokenLinks);
         }
 
         // --walk=true sends a point agent over the decoded strip geometry before any frame is drawn: gravity pulls it down,
