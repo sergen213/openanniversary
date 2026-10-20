@@ -448,176 +448,30 @@ int main(int argc, char** argv) {
         std::string drmError;
         if (!oa::cdc::DrmFile::parse(data, &drm, &drmError)) return fail("DRM: " + drmError);
 
-        // A strip's u16 values address some stride-20 vertex payload of this unit. §2 established section 0 as the
-        // level's array, but that pairing has to be measured, not assumed: coherence decides it. Two indices next to
-        // each other inside one strip are neighbours on one surface sheet, so their positions must sit close together.
-        // The number printed per tree is the root-mean-square longest triangle edge as a percentage of the candidate
-        // payload's own span; read against the wrong array an index lands anywhere and that figure goes to tens of
-        // percent instead of around one.
+        // §15: an oct-tree reaches its strips through the reference in each leaf, and a chain is walked from there - never
+        // by scanning payloads for header-shaped bytes. Section 0 holds the level's stride-20 vertex array (§2), so the
+        // triangles each tree draws are measured against it: median and p99 longest edge in world units, and the share of
+        // edges over 2,000 units, which is where §14's nonsense population lived.
         constexpr std::size_t kRecordBytes = 20;   // docs/formats/GEOMETRY.md §2
         const auto i16At = [](const std::span<const std::byte> p, std::size_t at) {
             return static_cast<std::int32_t>(static_cast<unsigned>(p[at]) | (static_cast<unsigned>(p[at + 1u]) << 8u));
         };
-
-        struct Coherence {
-            bool ok = false;
-            double rmsPercent = 0.0;
-            std::size_t longEdges = 0;   // edges longer than 1% of the payload's span
-            std::uint32_t records = 0;
-        };
-
-        const auto coherenceOf = [&](std::size_t arraySection, const std::vector<std::uint32_t>& tris) {
-            Coherence out;
-            const oa::cdc::DrmSection& candidate = drm.sections()[arraySection];
-            if (!candidate.stored || candidate.type != 0) return out;
-            const auto payload = drm.payload(candidate);
-            if (payload.size() < 2u * kRecordBytes) return out;
-            out.records = static_cast<std::uint32_t>(payload.size() / kRecordBytes);
-            std::int32_t low[3] = {32767, 32767, 32767};
-            std::int32_t high[3] = {-32768, -32768, -32768};
-            for (std::uint32_t r = 0; r < out.records; ++r) {
-                for (int axis = 0; axis < 3; ++axis) {
-                    const std::int32_t value = i16At(payload, static_cast<std::size_t>(r) * kRecordBytes + 2u * axis);
-                    low[axis] = std::min(low[axis], value);
-                    high[axis] = std::max(high[axis], value);
-                }
-            }
-            double spanSquared = 0.0;
+        const oa::cdc::DrmSection& array = drm.sections()[0];
+        if (!array.stored || array.size % kRecordBytes != 0u) return fail("section 0 is not a stride-20 vertex array");
+        const std::span<const std::byte> vertices = drm.payload(array);
+        const auto vertexCount = static_cast<std::uint32_t>(vertices.size() / kRecordBytes);
+        const auto edgeOf = [&](std::uint32_t a, std::uint32_t b) {
+            double squared = 0.0;
             for (int axis = 0; axis < 3; ++axis) {
-                const double extent = static_cast<double>(high[axis]) - static_cast<double>(low[axis]);
-                spanSquared += extent * extent;
+                const double delta = static_cast<double>(i16At(vertices, static_cast<std::size_t>(a) * kRecordBytes + 2u * axis)) -
+                                     static_cast<double>(i16At(vertices, static_cast<std::size_t>(b) * kRecordBytes + 2u * axis));
+                squared += delta * delta;
             }
-            if (!(spanSquared > 1.0)) return out;   // a payload that is one point cannot be an array to measure against
-            double sum = 0.0;
-            std::size_t counted = 0;
-            for (std::size_t t = 0; t + 2 < tris.size(); t += 3u) {
-                const std::uint32_t corner[3] = {tris[t], tris[t + 1u], tris[t + 2u]};
-                if (corner[0] >= out.records || corner[1] >= out.records || corner[2] >= out.records) continue;
-                double longest = 0.0;
-                for (int edge = 0; edge < 3; ++edge) {
-                    const std::size_t first = static_cast<std::size_t>(corner[edge]) * kRecordBytes;
-                    const std::size_t second = static_cast<std::size_t>(corner[(edge + 1) % 3]) * kRecordBytes;
-                    double squared = 0.0;
-                    for (int axis = 0; axis < 3; ++axis) {
-                        const double delta = static_cast<double>(i16At(payload, first + 2u * axis)) -
-                                             static_cast<double>(i16At(payload, second + 2u * axis));
-                        squared += delta * delta;
-                    }
-                    longest = std::max(longest, squared);
-                }
-                sum += longest / spanSquared;
-                if (longest > spanSquared / 10000.0) ++out.longEdges;
-                ++counted;
-            }
-            if (counted == 0) return out;
-            out.ok = true;
-            out.rmsPercent = 100.0 * std::sqrt(sum / static_cast<double>(counted));
-            return out;
+            return std::sqrt(squared);
         };
 
-        // §9's segmentation probe, kept here rather than in the library because its model is refuted for most
-        // payloads (§10): it cuts a payload at the offsets leaves resolve to and reads each block as u16 indices.
-        // A block that does not divide into whole in-range indices yields nothing, which is what `rejected` counts.
-        const auto runsSegmentedAt = [&](const std::span<const std::byte> payload,
-                                        std::vector<std::uint32_t> starts) {
-            std::sort(starts.begin(), starts.end());
-            starts.erase(std::unique(starts.begin(), starts.end()), starts.end());
-            std::vector<std::uint32_t> tris;
-            for (std::size_t block = 0; block < starts.size(); ++block) {
-                const std::uint32_t begin = starts[block];
-                const std::uint32_t end = block + 1u < starts.size()
-                                              ? starts[block + 1u]
-                                              : static_cast<std::uint32_t>(payload.size());
-                if (begin >= end || end > payload.size()) return std::vector<std::uint32_t>{};
-                const std::size_t count = (end - begin) / 2u;
-                for (std::size_t i = 0; i < count; ++i) {
-                    if (i16At(payload, begin + 2u * i) >= 0x10000) return std::vector<std::uint32_t>{};
-                }
-                for (std::size_t i = 2; i < count; ++i) {
-                    const std::uint32_t a = static_cast<std::uint32_t>(i16At(payload, begin + 2u * (i - 2u)));
-                    const std::uint32_t b = static_cast<std::uint32_t>(i16At(payload, begin + 2u * (i - 1u)));
-                    const std::uint32_t c = static_cast<std::uint32_t>(i16At(payload, begin + 2u * i));
-                    if (a == b || b == c || a == c) continue;   // degenerate restart between strips, §9
-                    tris.insert(tris.end(), {a, b, c});
-                }
-            }
-            return tris;
-        };
-
-
-        // §10: what those payloads do hold. A record start is accepted when its header is sane, its u16 index run stays
-        // inside section 0's stride-20 array (§2), and the triangles it draws are coherent against that array - RMS
-        // longest edge under 1% of the array's span. Accepting a record claims the bytes it spans, so starts never
-        // overlap. The header follows prior art tr7/game/terrain.h:46 TerrainTextureStripInfo, 44 bytes: vertexCount at
-        // +0, matIdx (i32) at +20 and nextTexture (u32) at +40; the indices start at +44.
-        const auto u32At = [](const std::span<const std::byte> p, std::size_t at) {
-            return static_cast<std::uint32_t>(static_cast<unsigned>(p[at])) |
-                   (static_cast<std::uint32_t>(static_cast<unsigned>(p[at + 1u])) << 8u) |
-                   (static_cast<std::uint32_t>(static_cast<unsigned>(p[at + 2u])) << 16u) |
-                   (static_cast<std::uint32_t>(static_cast<unsigned>(p[at + 3u])) << 24u);
-        };
-        constexpr std::size_t kStripHeaderBytes = 44;
-        struct StripRecord {
-            std::uint32_t offset = 0;
-            std::uint32_t vertexCount = 0;
-            std::int32_t matIdx = 0;
-            std::uint32_t nextTexture = 0;
-        };
-        const std::uint32_t kVertexLimit = static_cast<std::uint32_t>(drm.sections()[0].size / kRecordBytes);
-        std::vector<bool> referenced(kVertexLimit, false);
+        std::vector<bool> referenced(vertexCount, false);
         std::uint32_t referencedCount = 0;
-        std::map<std::size_t, std::vector<StripRecord>> stripRecords;   // section index -> its records, in offset order
-        for (std::size_t s = 1; s < drm.sections().size(); ++s) {
-            const auto& section = drm.sections()[s];
-            if (!section.stored || section.type != 0 || section.size < kStripHeaderBytes + 6u) continue;
-            const auto payload = drm.payload(section);
-            std::vector<StripRecord> records;
-            for (std::size_t off = 0; off + kStripHeaderBytes <= payload.size(); off += 2u) {
-                const std::uint32_t vc = u32At(payload, off);
-                if (vc < 3 || vc > 8192) continue;
-                const std::size_t end = off + kStripHeaderBytes + 2u * vc;
-                if (end > payload.size()) continue;
-                const std::size_t base = off + kStripHeaderBytes;
-                bool inRange = true;
-                for (std::uint32_t i = 0; i < vc && inRange; ++i) {
-                    inRange = static_cast<std::uint32_t>(i16At(payload, base + 2u * i)) < kVertexLimit;
-                }
-                if (!inRange) continue;
-                std::vector<std::uint32_t> tris;
-                for (std::uint32_t i = 2; i < vc; ++i) {
-                    const std::uint32_t a = static_cast<std::uint32_t>(i16At(payload, base + 2u * (i - 2u)));
-                    const std::uint32_t b = static_cast<std::uint32_t>(i16At(payload, base + 2u * (i - 1u)));
-                    const std::uint32_t c = static_cast<std::uint32_t>(i16At(payload, base + 2u * i));
-                    if (a == b || b == c || a == c) continue;   // degenerate restart between strips, §9
-                    tris.insert(tris.end(), {a, b, c});
-                }
-                const Coherence coherence = coherenceOf(0, tris);
-                if (!coherence.ok || coherence.rmsPercent >= 1.0) continue;
-                records.push_back({static_cast<std::uint32_t>(off), vc, static_cast<std::int32_t>(u32At(payload, off + 20u)),
-                                   u32At(payload, off + 40u)});
-                for (std::uint32_t i = 0; i < vc; ++i) {
-                    if (const std::uint32_t v = static_cast<std::uint32_t>(i16At(payload, base + 2u * i)); !referenced[v]) {
-                        referenced[v] = true;
-                        ++referencedCount;
-                    }
-                }
-                off = end - 2u;   // the loop step lands on `end`, the byte after this record
-            }
-            if (!records.empty()) stripRecords.emplace(s, std::move(records));
-        }
-        std::size_t totalRecords = 0;
-        std::size_t chained = 0;
-        for (const auto& entry : stripRecords) {
-            for (const StripRecord& r : entry.second) {
-                ++totalRecords;
-                if (std::any_of(entry.second.begin(), entry.second.end(),
-                                [&](const StripRecord& o) { return o.offset == r.nextTexture; })) {
-                    ++chained;
-                }
-            }
-        }
-        std::size_t leafTotal = 0;
-        std::size_t leafRecordHits = 0;
         std::size_t trees = 0;
         for (std::size_t i = 0; i < drm.sections().size(); ++i) {
             const auto& nodeSection = drm.sections()[i];
@@ -634,66 +488,53 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "section %-4zu: no oct-tree (%s)\n", i, why.c_str());
                 continue;
             }
-            std::map<std::uint32_t, std::vector<std::uint32_t>> startsPerSection;
+            ++trees;
+            std::map<std::uint32_t, std::vector<std::uint32_t>> headsPerSection;
             for (const auto& leaf : tree.leafList) {
                 if (leaf.targetSection >= drm.sections().size()) continue;
-                startsPerSection[leaf.targetSection].push_back(leaf.offsetInTarget);
-                const auto found = stripRecords.find(leaf.targetSection);
-                ++leafTotal;
-                if (found != stripRecords.end() &&
-                    std::any_of(found->second.begin(), found->second.end(),
-                                [&](const StripRecord& r) { return r.offset == leaf.offsetInTarget; })) {
-                    ++leafRecordHits;   // a leaf that lands on a real record start, §10
-                }
+                headsPerSection[leaf.targetSection].push_back(leaf.offsetInTarget);
             }
             std::vector<std::uint32_t> tris;
-            std::size_t rejected = 0;
-            for (const auto& entry : startsPerSection) {
+            std::uint32_t records = 0, heads = 0, badHeads = 0, brokenLinks = 0, snappedLinks = 0;
+            std::uint32_t low = vertexCount, high = 0u;
+            for (const auto& entry : headsPerSection) {
                 const auto& strip = drm.sections()[entry.first];
-                if (!strip.stored) {
-                    ++rejected;
+                if (!strip.stored) continue;
+                oa::cdc::TerrainStripChain walked;
+                std::string chainError;
+                if (!oa::cdc::decodeTerrainStripChains(drm.payload(strip), entry.second, vertexCount, &walked,
+                                                       &chainError)) {
+                    std::fprintf(stderr, "section %-4u: chain walk skipped (%s)\n", entry.first, chainError.c_str());
                     continue;
                 }
-                const std::vector<std::uint32_t> run = runsSegmentedAt(drm.payload(strip), entry.second);
-                if (run.empty()) {
-                    ++rejected;   // the block holds no whole u16 runs
-                    continue;
-                }
-                tris.insert(tris.end(), run.begin(), run.end());
+                records += walked.records; heads += walked.heads; badHeads += walked.badHeads;
+                brokenLinks += walked.brokenLinks; snappedLinks += walked.snappedLinks;
+                tris.insert(tris.end(), walked.indices.begin(), walked.indices.end());
             }
-            if (tris.empty()) {
-                std::printf("section %-4zu nodes=%-5u leaves=%-5u depth=%-3u rejected=%-2zu has no usable strip runs\n", i,
-                            static_cast<unsigned>(tree.nodes), static_cast<unsigned>(tree.leaves),
-                            static_cast<unsigned>(tree.maxDepth), rejected);
-                ++trees;
-                continue;
+            std::vector<double> edges;
+            edges.reserve(tris.size() / 3u * 3u);
+            for (std::size_t t = 0; t + 2 < tris.size(); t += 3u) {
+                const std::uint32_t a = tris[t], b = tris[t + 1u], c = tris[t + 2u];
+                for (std::uint32_t v : {a, b, c}) { referenced[v] = true; low = std::min(low, v); high = std::max(high, v); }
+                edges.push_back(edgeOf(a, b)); edges.push_back(edgeOf(b, c)); edges.push_back(edgeOf(c, a));
             }
-            std::uint32_t maxIndex = 0;
-            for (const std::uint32_t value : tris) maxIndex = std::max(maxIndex, value);
-            const Coherence baseline = coherenceOf(0, tris);   // the array §2 established
-            Coherence best = baseline;
-            std::size_t bestSection = 0;
-            for (std::size_t c = 1; c < drm.sections().size(); ++c) {
-                if (!drm.sections()[c].stored || drm.sections()[c].type != 0) continue;
-                if (drm.sections()[c].size / kRecordBytes <= maxIndex) continue;   // too small to hold these indices
-                const Coherence trial = coherenceOf(c, tris);
-                if (trial.ok && (!best.ok || trial.rmsPercent < best.rmsPercent)) {
-                    best = trial;
-                    bestSection = c;
-                }
-            }
-            std::printf("section %-4zu nodes=%-5u leaves=%-5u depth=%-3u maxIndex=%-6u triangles=%-7zu rejected=%-2zu "
-                        "| section 0 rms=%.2f%% | best: section %-4zu records=%-6u rms=%.2f%% longEdges>1%%=%zu\n",
+            std::sort(edges.begin(), edges.end());
+            const auto percentile = [&edges](double fraction) {
+                return edges.empty() ? 0.0
+                    : edges[std::min(edges.size() - 1u, static_cast<std::size_t>(fraction * static_cast<double>(edges.size())))];
+            };
+            std::size_t longEdges = 0;
+            for (double e : edges) if (e > 2000.0) ++longEdges;
+            std::printf("section %-4zu nodes=%-5u leaves=%-5u depth=%-3u | chains: heads=%-5u records=%-5u badHeads=%-3u "
+                        "broken=%-3u snapped=%-4u | tris=%-7zu idx %6u..%6u edge p50=%6.0f p99=%7.0f max=%8.0f over2000=%.2f%%\n",
                         i, static_cast<unsigned>(tree.nodes), static_cast<unsigned>(tree.leaves),
-                        static_cast<unsigned>(tree.maxDepth), maxIndex, tris.size() / 3u, rejected,
-                        baseline.ok ? baseline.rmsPercent : -1.0, bestSection, best.records,
-                        best.ok ? best.rmsPercent : -1.0, best.longEdges);
-            ++trees;
+                        static_cast<unsigned>(tree.maxDepth), heads, records, badHeads, brokenLinks, snappedLinks,
+                        tris.size() / 3u, low, high, percentile(0.5), percentile(0.99),
+                        edges.empty() ? 0.0 : edges.back(),
+                        edges.empty() ? 0.0 : 100.0 * static_cast<double>(longEdges) / static_cast<double>(edges.size()));
         }
-        std::printf("strip records (GEOMETRY.md 10): %zu payload(s) hold %zu record(s), %zu chain to another record "
-                    "start; they reference %u/%u vertices of section 0\n", stripRecords.size(), totalRecords, chained,
-                    referencedCount, kVertexLimit);
-        std::printf("leaf addends landing on a record start: %zu of %zu\n", leafRecordHits, leafTotal);
+        for (bool r : referenced) if (r) ++referencedCount;
+        std::printf("vertices reached by these chains: %u of %u in section 0\n", referencedCount, vertexCount);
         std::fprintf(stderr, "%zu oct-tree section(s)\n", trees);
         return 0;
     }

@@ -19,9 +19,11 @@ ctest --test-dir "$scratch/plain" --output-on-failure
 echo "== 2/3 renderer smoke =="
 game_args=()
 # With a real install available, draw shipped geometry too: one level unit's unindexed vertex run plus its terrain strip
-# records indexed (`--strips=true`, the level unit hash is documented in docs/formats/GEOMETRY.md §6 and §13;
-# OA_MESH_RECORD overrides it for another unit).
-[[ -n "${OA_GAME_DIR:-}" ]] && game_args+=(--gameDir="$OA_GAME_DIR" --mesh="${OA_MESH_RECORD:-8baf540e}" --strips=true)
+# records reached through the oct-tree leaves (`--strips=true`, the level unit hash is documented in
+# docs/formats/GEOMETRY.md §6 and §15; OA_MESH_RECORD overrides it for another unit). `--walk=true` also runs the
+# deterministic point agent over that geometry so the query and its harness cannot rot silently - GEOMETRY.md §16 says why
+# its heights are not asserted.
+[[ -n "${OA_GAME_DIR:-}" ]] && game_args+=(--gameDir="$OA_GAME_DIR" --mesh="${OA_MESH_RECORD:-8baf540e}" --strips=true --walk=true)
 log="$scratch/smoke.log"; status=0
 if [[ -n "${WAYLAND_DISPLAY:-}" ]]; then
     "$scratch/plain/oa-game" --selfCheck=true --frames=3 "${game_args[@]}" >"$log" 2>&1 || status=$?

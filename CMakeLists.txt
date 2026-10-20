@@ -39,7 +39,8 @@ endforeach()
 add_custom_target(oa_shaders ALL DEPENDS ${OA_SHADER_OUTPUTS})
 
 # cdc container layer: bigfile archives of the Legend-era engine (docs/formats/CONTAINERS.md).
-add_library(oa_cdc STATIC src/cdc/Bigfile.cpp src/cdc/Drm.cpp src/cdc/Texture.cpp src/cdc/Geometry.cpp)
+add_library(oa_cdc STATIC src/cdc/Bigfile.cpp src/cdc/Drm.cpp src/cdc/Texture.cpp src/cdc/Geometry.cpp
+                       src/cdc/TerrainQuery.cpp)
 target_include_directories(oa_cdc PUBLIC src)
 target_link_libraries(oa_cdc PUBLIC ZLIB::ZLIB)
 
@@ -66,7 +67,7 @@ if(OA_BUILD_TESTS)
   enable_testing()
   find_package(GTest REQUIRED)
   add_executable(oa_tests tests/test_bigfile.cpp tests/test_core.cpp tests/test_drm.cpp tests/test_geometry.cpp
-                       tests/test_texture.cpp)
+                       tests/test_texture.cpp tests/test_terrain_query.cpp)
   target_link_libraries(oa_tests PRIVATE oa_cdc oa_core GTest::gtest_main)
   include(GoogleTest)
   gtest_discover_tests(oa_tests)

@@ -114,12 +114,28 @@ Four independent checks, because "it drew something" is not evidence:
   level silhouette with facet colours and depth occlusion, but it cannot serve as the byte check: KDE's compositor remaps
   window pixels, so not one of the ~540k window pixels equalled a shipped byte exactly here. Capture for shape, probe for
   bytes (`docs/formats/GEOMETRY.md` §6).
-* **Indexed terrain strips** — `oa-game --gameDir="<install>" --mesh=8baf540e --selfCheck=true --strips=true` decodes the
-  unit's strip records and uploads them as an index buffer instead of reading the vertex array three records at a time: log
-  line `3882 strip record(s) in 2357 chain link(s): 262733 triangle(s) over 149077 vertex/vertices`, probe
-  `mesh probe: 4480/9216 pixels covered by 12829 distinct vertex colours, 0 unexplained`. The topology evidence - 79.8% of the
-  triangles' edges shared with another triangle against 0% for the unindexed run - is measured in
-  `docs/formats/GEOMETRY.md` §13; nothing culls yet, so every chain in the unit draws.
+* **Indexed terrain strips** — `oa-game --gameDir="<install>" --mesh=8baf540e --selfCheck=true --strips=true` walks the unit's
+  nine oct-trees and uploads the strip index lists their leaves reach, instead of reading the vertex array three records at a
+  time: log line `9 terrain tree(s): 1620 leaf reference(s) reached 4776 record(s), drawing 135914 triangle(s) over 149077
+  vertex/vertices; 0 bad head(s), 109 broken link(s), 1511 link(s) stepped onto their record`, probe `mesh probe: 2194/9216
+  pixels covered by 12829 distinct vertex colours, 0 unexplained`. Chains are entered only from leaf references - never by
+  scanning payloads for header-shaped bytes - which is why every head resolves and the counts repeat exactly
+  (`docs/formats/GEOMETRY.md` §15); what the stepped links mean is measured in §16. Nothing culls yet, so whole chains draw.
+  `oa-asset <install> terrain --hash 8BAF540E` prints the same walk per tree - nodes, leaves, chain health and edge
+  percentiles - and refuses to call a payload an oct-tree when its node fields say otherwise.
+* **Walking over that geometry** — `oa-game --gameDir="<install>" --mesh=8baf540e --strips=true --walk=true --selfCheck=true
+  --frames=1` runs a point agent with gravity on a fixed timestep across a uniform-grid query (`src/cdc/TerrainQuery.*`)
+  built from the same index lists, and logs what it stood on: `terrain grid: 135914 triangle(s), cell 213.5 units, 194x172
+  cells, y -4534..27613`, `walk finished: 773 of 900 tick(s) supported`, and the corners of the triangle it settled on - here
+  `(21537, 15459, 13376) (17178, 20531, 5509) (4649, 26352, 5509)`, an edge of ~13.8k world units. The run is deterministic
+  and repeats identically; those heights are not shipped ground truth: §16 measures two trees whose records are coarse
+  throughout (median longest edges 9,926 and 6,934 units) and that is where the agent lands, and the app says so at Warn level
+  in the same log. The query itself has five data-free tests with exact expected heights: highest surface under foot, top
+  floor of two stacked planes, a wall giving no support, refused inputs, cell size taken from the mesh
+  (`oa_tests --gtest_filter=TerrainQuery*`). Seven `TerrainStrips.*` tests pin the chain walk on synthetic payloads: a leaf
+  head walking to the end of its chain, a bad head counted instead of guessed, a shared tail emitted once, an index naming a
+  vertex the unit does not have, a link stepped forward only onto a real header (and one too far ending the chain), a cycle
+  walked once, and a payload holding something else (`oa_tests --gtest_filter=TerrainStrips*`).
 
 Validation-layer runs must be clean apart from the host's stale `liblsfg-vk-layer.so` loader messages documented in
 `docs/ENVIRONMENT.md`; anything else is a bug to fix, not to suppress.

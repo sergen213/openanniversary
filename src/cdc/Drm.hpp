@@ -45,12 +45,14 @@ struct DrmSection {
     bool stored = true;
 };
 
-// One relocation entry, 8 bytes, stored immediately before its payload. tra.exe walks these in the
-// unit loader (FUN_005bca80, case 5): kind is bits 0-2 of the first u16, the target section index is
-// bits 3-15, and the last field is the byte offset inside *this* payload where a pointer slot lives.
-// Kind 0 patches that slot to `base(sectionIndex) + addend`, the addend being the u32 already stored at
-// the slot [V-exe]. Other kinds route through the per-type handler objects (kinds 1-3 there, plus a
-// skip default); kind 2 combines typeSpecific with the low half of the stored value.
+// One relocation entry, 8 bytes, stored immediately before its payload. tra.exe walks these in the unit loader
+// (FUN_005bca80, case 5): kind is bits 0-2 of the first u16 and the remaining bits name a section **one past** our
+// table index - the engine counts sections from 1. Measured on unit `8baf540e`: every one of the 4,776 strip-record
+// pointer slots (record +40) and all 622 oct-tree child slots name own-index+1 [V-data], and subtracting one makes
+// each of those slots resolve inside its own payload while all 1,620 oct-tree leaf references land on a strip record.
+// Kind 0 patches that slot to `base(sectionIndex) + addend`, the addend being the u32 already stored at the slot
+// [V-exe]. Other kinds route through the per-type handler objects (kinds 1-3 there, plus a skip default); kind 2
+// combines typeSpecific with the low half of the stored value.
 struct DrmReloc {
     std::uint16_t kindAndSection = 0;
     std::uint16_t typeSpecific = 0;
@@ -58,8 +60,13 @@ struct DrmReloc {
 };
 
 inline unsigned char relocKind(const DrmReloc& r) { return static_cast<unsigned char>(r.kindAndSection & 7u); }
-inline std::uint16_t relocSectionIndex(const DrmReloc& r) {
-    return static_cast<std::uint16_t>(r.kindAndSection >> 3u);
+// The stored value is one past our directory index, because the engine counts sections from 1 (see DrmReloc above). A
+// stored 0 names nothing - the engine never writes it in a real unit - so such an entry resolves to `kNoRelocSection`,
+// which callers already handle by bounds-checking the index against the section count.
+inline constexpr std::uint32_t kNoRelocSection = 0xFFFFFFFFu;
+inline std::uint32_t relocSectionIndex(const DrmReloc& r) {
+    const std::uint16_t stored = static_cast<std::uint16_t>(r.kindAndSection >> 3u);
+    return stored == 0u ? kNoRelocSection : static_cast<std::uint32_t>(stored - 1u);
 }
 
 // One parsed unit. Sections are exposed in table order (the archive stores payloads in that same

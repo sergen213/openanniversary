@@ -80,128 +80,88 @@ std::uint16_t loadU16(const std::byte* at) {
 
 
 
-bool decodeTerrainStripChain(std::span<const std::byte> payload, std::span<const MeshVertex> vertices,
-                             TerrainStripChain* out, std::string* error) {
+bool decodeTerrainStripChains(std::span<const std::byte> payload, std::span<const std::uint32_t> heads,
+                               std::size_t vertexCount, TerrainStripChain* out, std::string* error) {
     constexpr std::size_t kHeaderBytes = 44;   // GEOMETRY.md §10, prior art tr7/game/terrain.h:46
     const auto fail = [&](const std::string& message) {
         if (error != nullptr) *error = message;
         return false;
     };
-    if (out == nullptr) return fail("decodeTerrainStripChain needs an output struct");
+    if (out == nullptr) return fail("decodeTerrainStripChains needs an output struct");
     out->indices.clear();
     out->materialOfTriangle.clear();
-    out->records = 0;
-    out->chained = 0;
-    if (vertices.size() < 3u) return true;   // no array for the indices to address
+    out->heads = out->records = out->badHeads = out->brokenLinks = out->snappedLinks = 0u;
 
-    const auto position = [&](std::uint32_t i) {
-        return std::array<float, 3>{static_cast<float>(vertices[i].x), static_cast<float>(vertices[i].y),
-                                    static_cast<float>(vertices[i].z)};
-    };
-    const auto squaredDistance = [](const std::array<float, 3>& a, const std::array<float, 3>& b) {
-        float sum = 0.0f;
-        for (int axis = 0; axis < 3; ++axis) sum += (a[axis] - b[axis]) * (a[axis] - b[axis]);
-        return sum;
-    };
-    const auto medianOf = [](std::vector<float>& values) {
-        std::size_t middle = values.size() / 2u;
-        std::nth_element(values.begin(), values.begin() + static_cast<std::ptrdiff_t>(middle), values.end());
-        return values[middle];
-    };
-
-    // The scale of the unit's own surface: the median longest edge over consecutive triples, which is how §6 reads a run.
-    // Sampled, because a level array holds ~150k vertices and the median does not need all of them.
-    std::vector<float> scale;
-    for (std::size_t first = 0; first + 3u <= vertices.size(); first += 3u) {
-        const auto a = position(static_cast<std::uint32_t>(first));
-        const auto b = position(static_cast<std::uint32_t>(first + 1u));
-        const auto c = position(static_cast<std::uint32_t>(first + 2u));
-        scale.push_back(std::max({squaredDistance(a, b), squaredDistance(b, c), squaredDistance(c, a)}));
-        if (scale.size() >= 4096u) break;   // [V-data] unit 8baf540e: median longest edge 146 world units either way
-    }
-    const float edgeLimit = kStripEdgeScaleFactor * kStripEdgeScaleFactor * medianOf(scale);
-
-    struct Record {
-        std::uint32_t offset = 0;
-        std::int32_t matIdx = 0;
-        std::uint32_t nextTexture = 0;
-        std::vector<std::uint32_t> run;   // the index words as stored, restarts included
-    };
-    const auto u16At = [&](std::size_t at) { return static_cast<std::uint32_t>(loadU16(payload.data() + at)); };
-
-    // Pass one: find record starts. Accepting a record claims the bytes it spans, so two records never overlap and an
-    // index run is not mistaken for another header. 0xFFFF ends a strip inside a run like the restarts §9 measured, so
-    // those words drop out of both gates as well as out of the triangles.
-    std::vector<Record> records;
-    for (std::size_t off = 0; off + kHeaderBytes <= payload.size(); off += 2u) {
-        const std::uint32_t vertexCount = loadU32(payload.data() + off);
-        if (vertexCount < 3u || vertexCount > 8192u) continue;
-        const std::size_t indexStart = off + kHeaderBytes;
-        const std::size_t end = indexStart + 2u * vertexCount;
-        if (end > payload.size()) continue;
-        std::vector<std::uint32_t> run;
-        run.reserve(vertexCount);
-        bool inRange = true;
-        for (std::uint32_t i = 0; i < vertexCount && inRange; ++i) {
-            const std::uint32_t index = u16At(indexStart + 2u * i);
-            if (index != 0xFFFFu && index >= vertices.size()) inRange = false;
-            run.push_back(index);
+    // What makes a record here is structure, not statistics: vertexCount a multiple of three within a sane range, the
+    // index run inside this payload, and every index naming a vertex of the array (GEOMETRY.md §15 measured all 4,768
+    // chain-walked records against those tests, with no 0xFFFF restart word among them).
+    const auto readRecord = [&](std::size_t at, std::uint32_t* count, std::int32_t* matIdx, std::uint32_t* next) {
+        if (at + kHeaderBytes > payload.size()) return false;
+        const std::byte* base = payload.data() + at;
+        const std::uint32_t vertexCountHere = loadU32(base);
+        if (vertexCountHere < 3u || vertexCountHere > 8192u || vertexCountHere % 3u != 0u) return false;
+        if (at + kHeaderBytes + 2u * static_cast<std::size_t>(vertexCountHere) > payload.size()) return false;
+        for (std::uint32_t i = 0; i < vertexCountHere; ++i) {
+            if (static_cast<std::size_t>(loadU16(base + kHeaderBytes + 2u * i)) >= vertexCount) return false;
         }
-        if (!inRange || run.size() < 3u) continue;
-
-        std::size_t close = 0;   // locality: consecutive indices inside a real strip sit near each other
-        for (std::size_t i = 1; i < run.size(); ++i) {
-            if (run[i] == 0xFFFFu || run[i - 1u] == 0xFFFFu) continue;   // a pair across two strips says nothing
-            const std::int64_t delta = static_cast<std::int64_t>(run[i]) - static_cast<std::int64_t>(run[i - 1u]);
-            if (delta >= -8 && delta <= 8) close += 1;
-        }
-        if (static_cast<float>(close) < kStripLocalityFraction * static_cast<float>(run.size() - 1u)) continue;
-
-        std::vector<float> edges;   // edge scale: the record must draw triangles of this unit's own size
-        for (std::size_t i = 2; i < run.size(); ++i) {
-            const std::uint32_t a = run[i - 2u], b = run[i - 1u], c = run[i];
-            if (a == 0xFFFFu || b == 0xFFFFu || c == 0xFFFFu) continue;   // straddles a restart
-            edges.push_back(std::max({squaredDistance(position(a), position(b)), squaredDistance(position(b), position(c)),
-                                      squaredDistance(position(c), position(a))}));
-        }
-        if (edges.empty() || medianOf(edges) > edgeLimit) continue;
-
-        records.push_back({static_cast<std::uint32_t>(off), static_cast<std::int32_t>(loadU32(payload.data() + off + 20u)),
-                           loadU32(payload.data() + off + 40u), std::move(run)});
-        off = end - 2u;   // the loop step lands on `end`, the byte after this record
-    }
-
-    const auto startOf = [&](std::uint32_t offset) -> std::size_t {
-        for (std::size_t i = 0; i < records.size(); ++i) {
-            if (records[i].offset == offset) return i;
-        }
-        return records.size();
+        *count = vertexCountHere;
+        *matIdx = static_cast<std::int32_t>(loadU32(base + 20u));
+        *next = loadU32(base + 40u);
+        return true;
     };
 
-    // Pass two: walk every chain once, so a record reached through nextTexture is not drawn again from its own start.
-    TerrainStripChain strips;
-    std::vector<char> seen(records.size(), 0);
-    for (std::size_t first = 0; first < records.size(); ++first) {
-        if (seen[first]) continue;
-        for (std::size_t at = first; at < records.size();) {
-            if (seen[at]) break;   // a cycle in nextTexture, or this record joins one already walked
-            seen[at] = 1;
-            const Record& record = records[at];
-            strips.records += 1;
-            for (std::size_t i = 2; i < record.run.size(); ++i) {
-                const std::uint32_t a = record.run[i - 2u], b = record.run[i - 1u], c = record.run[i];
-                if (a == 0xFFFFu || b == 0xFFFFu || c == 0xFFFFu) continue;   // straddles a strip restart, §9
-                if (a == b || b == c || a == c) continue;                     // degenerate restart, §9
-                strips.indices.insert(strips.indices.end(), {a, b, c});
-                strips.materialOfTriangle.push_back(record.matIdx);
+    std::vector<std::size_t> walked;   // record offsets already emitted, so a shared tail is drawn once
+    for (std::uint32_t head : heads) {
+        std::size_t at = head;
+        bool producedAny = false;
+        while (true) {
+            std::uint32_t count = 0u;
+            std::uint32_t next = 0u;
+            std::int32_t matIdx = 0;
+            if (!readRecord(at, &count, &matIdx, &next)) {
+                if (producedAny) out->brokenLinks += 1u; else out->badHeads += 1u;
+                break;
             }
-            const std::size_t next = startOf(record.nextTexture);
-            if (next >= records.size()) break;   // the chain ends in this payload
-            strips.chained += 1;
-            at = next;
+            if (std::find(walked.begin(), walked.end(), at) != walked.end()) {   // shared tail or a cycle
+                if (!producedAny) out->heads += 1u;   // this leaf's bytes are a record, drawn by another chain
+                break;
+            }
+            walked.push_back(at);
+            producedAny = true;
+            out->records += 1u;
+            const std::byte* run = payload.data() + at + kHeaderBytes;
+            for (std::uint32_t i = 0; i + 2u < count; i += 3u) {
+                out->indices.push_back(loadU16(run + 2u * i));
+                out->indices.push_back(loadU16(run + 2u * (i + 1u)));
+                out->indices.push_back(loadU16(run + 2u * (i + 2u)));
+                out->materialOfTriangle.push_back(matIdx);
+            }
+            // Chains end on a null nextTexture (prior art tr7/game/terrain.h:46); the shipped records that end a chain
+            // measured here hold 0xFFFFFFFF in that slot instead of zero, so both terminate [V-data].
+            if (next == 0u || next == 0xFFFFFFFFu) break;
+            // A link naming a valid header is used exactly as stored. The file form pads record runs to keep headers on
+            // an even byte and patches these slots through relocations, which leaves part of them short of the header they
+            // mean: measured over unit `8baf540e`'s strip payloads, 139 of 750 links name a spot exactly four bytes before
+            // the record that follows it (docs/formats/GEOMETRY.md §16). Stepping forward to a real header is allowed - up
+            // to two words, and only when the bytes there pass every record test. Anything else ends the chain.
+            bool linked = false;
+            for (std::size_t extra = 0u; extra <= 8u; extra += 4u) {
+                const std::size_t candidate = static_cast<std::size_t>(next) + extra;
+                std::uint32_t linkCount = 0u, linkNext = 0u;
+                std::int32_t linkMat = 0;
+                if (!readRecord(candidate, &linkCount, &linkMat, &linkNext)) continue;
+                if (extra != 0u) out->snappedLinks += 1u;
+                at = candidate;
+                linked = true;
+                break;
+            }
+            if (!linked) {
+                out->brokenLinks += 1u;
+                break;
+            }
         }
+        if (producedAny) out->heads += 1u;
     }
-    *out = std::move(strips);
     if (error != nullptr) error->clear();
     return true;
 }

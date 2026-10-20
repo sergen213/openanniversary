@@ -357,3 +357,110 @@ Both agree on what matters: nearly all header-shaped starts in terrain payloads 
 Open after this: which texture a `matIdx` selects (92 values against the unit's type-5 sections), how oct-tree leaves choose
 a sub-run inside these chains - §10 measured 15 of 16 addends landing *inside* an accepted record's index array rather than
 on its header - and culling, since every chain in the unit draws whether the camera sees it or not.
+
+## 14. What a walk over those strips exposed, measured [V-data]
+
+§13's topology claim rests on edge sharing, which holds for most of the mesh; whether *every* accepted strip lands where it
+should was untested until a point agent was walked over the decoded triangles (`TerrainQuery`, `--walk=true`). It is not.
+
+    oa-game --gameDir="<install>" --mesh=8baf540e --strips=true --walk=true --frames=1
+    4559 strip record(s) in 2804 chain link(s): 252,515 triangle(s) over 149,077 vertex/vertices, 25,832 sliver dropped
+    terrain grid: 252,515 triangles, cell 201.4 units, 268x249 cells, y -7,755..27,613
+    warn [app] the surface under foot comes from strip index lists whose vertex base is not established (GEOMETRY.md 14):
+          these heights measure the decode, not shipped ground
+    walk finished: 825 of 900 tick(s) supported, final (6,657.5, 25,422.0, 595.0)
+    settled on triangle 247,354: (17,178 20,531 5,509) (4,649 26,352 5,509) (4,649 26,352 -3,032)
+
+That last triangle is the falsification: an edge 13.8k world units long, surviving a gate set at four times its payload's own
+median triangle edge. Per-payload gates are only as strict as the population they calibrate against, so a payload that is
+mostly large triangles gets a loose limit [V-data]. Tightening the scale to the vertex array's consecutive-triple median
+(§13's original baseline) drops 24,962 triangles but collapses the mesh it leaves: y falls to 1,978..16,380 and the z extent
+to about 5.6k units of a 55k-wide level - over-pruning, because that baseline is not topology (§6).
+
+A per-record census over the 117 cached payloads (header sanity: `vertexCount` 3-2000, `matIdx` -1..4096, `lightFlags`
+<= 0xFFFF, index run inside the payload) separates real strips from header-shaped noise cleanly [V-data]:
+
+    candidate records                     404
+    index words below 149,077             61,658 of 61,658   (none out of range; only 1,344 read negative as i16)
+    share of a record's triangles with an XY edge over 550 units: p25 0.000  median 0.000  p75 0.885
+    records whose every triangle is short                       50.2%
+    nextTexture (+40) naming the following record start         149 of 404;   zero (a chain tail) 17;   naming nothing 238
+
+Bimodal, not a continuum: half the header-shaped starts are coherent surface, the other half draws nothing at this scale, and
+a quarter are structurally linked to their neighbour. Linkage is therefore the stronger validator, and coherence a usable
+second opinion - neither was what §13's gates used.
+
+Why some strips land far away has one live explanation [S]: prior art keeps strip indices relative to a per-material vertex
+buffer base (`tr7/game/terrain.h:67-74`, `XboxPcMaterialStripList.vbBaseOffset`), and §13 found records touching only 15,724
+of the array's 149,077 vertices. No such table turned up in the cached payloads: scanning for `numMaterials` followed by
+{tpageid, flags, vbBaseOffset, numStrips} at stride 16 or 20 with increasing bases, and for runs of eight or more increasing
+multiples of 20, yields nothing [V-data]. Four offsets hold a lone word equal to 92 - the unit's material count - in sections
+77 (0x6fd0), 82 (0x28), 141 (0x150) and 163 (0x28); what follows them is not that layout. Settling this means reading the
+terrain-group constructor named at §11's caller list, where the game patches strip indices as it loads a unit.
+
+## 15. Leaf references land on record headers once the relocation section numbering is fixed, measured [V-data]
+
+§10's open question - only 85 of 1,620 leaf addends named a record start - was an off-by-one in our own parser, not in the
+data. A relocation entry names its target section **one past** our directory index: the engine counts sections from 1
+(`Drm.hpp`, read out of `tra.exe`'s unit loader `FUN_005bca80` case 5 [V-exe]). Subtracting one makes every self-referring
+slot resolve inside its own payload - all 622 oct-tree child slots and the pointer slot at record +40 name own-index+1
+[V-data] - and with that numbering every leaf reference of unit `8baf540e` lands on a record header whose index run stays
+inside the target payload. Nine payloads hold oct-trees; their 1,620 leaves resolve into sibling type-0 sections:
+
+    oa-asset <install> terrain --hash 8BAF540E        (the same numbers §16 reprints with link counts)
+    section 77   nodes=800  leaves=657  depth=10 | heads=657  records=1913 badHeads=0
+    section 86   nodes=623  leaves=533  depth=6  | heads=533  records=1262 badHeads=0
+    sections 131, 140, 165, 190, 197, 200, 215: leaves 112, 83, 68, 79, 28, 52, 8; badHeads=0 for each
+    vertices reached by these chains: 16338 of 149077 in section 0
+
+So a leaf's +16 slot is the first strip record of that leaf's chain, exactly as prior art walks it (`DrawOctreeSphere` ->
+`sphere->strip`, `tr7/game/pc/D3D/d3dterrain.cpp:182`) [V-data]. That closes §9 and §10. It also retires the payload-wide
+header scan of §10-§14 from both library and tool: chains are entered only from leaf references now
+(`decodeTerrainOctree` -> `decodeTerrainStripChains`). The scan was never a description of the shipped data - over unit
+`8baf540e` it admits thousands of starts that sit inside another record's index run, and those are what §13's census and
+§14's long joins were mixed with [V-data]. `TerrainStripChain` reports what a leaf-driven walk actually found: 4,776
+records across the nine trees, all heads good.
+
+## 16. Chain links are patched offsets; what they reach is one contiguous block, measured [V-data]
+
+Following `nextTexture` (+40) as a raw in-payload offset ended every chain at its first link - broken links equalled the
+leaf count for all nine trees. Two properties of the payloads explain that:
+
+- The +40 slot is itself a relocation site. In twelve sampled strip payloads (sections 79, 82, 83, 84, 100, 105, 111, 126,
+  132, 145, 160, 175) the section's own kind-0 entries sit exactly at header+40 and give 806 header positions; 731 of them
+  pass §15's structural tests. The other 75 name index runs that reach outside section 0 - which is also what a base-offset
+  scheme would produce, so they are not dismissed [S], see below.
+- Padding puts the stored value short of the header it means. Records with an odd `vertexCount` pad their run to keep the
+  next header on an even byte (section 79: a record with count 39 spans 128 bytes, six more than 44 + 2*39), and over those
+  twelve payloads 580 of 750 layout-adjacent links name the following header exactly while 139 name a spot four bytes
+  before it.
+
+`decodeTerrainStripChains` therefore takes a link as stored when it names a valid record, and otherwise steps forward by at
+most two words to one that passes every structural test - counting each step (`snappedLinks`). A link naming nothing valid
+inside that reach ends the chain; nothing is guessed. Over unit `8baf540e`: 1,511 links stepped (all of them four bytes),
+109 ended a chain, and `badHeads` stayed 0 across all nine trees [V-data]. The step ceiling is measured behaviour, not a
+tuned constant - §17 should replace it by reading the loader's patch pass if one exists.
+
+    section 77   nodes=800  leaves=657  depth=10 | heads=657  records=1913 badHeads=0 broken=42  snapped=615 | tris=43723 idx 0..16118 edge p50=63    p99=14460 max=86534 over2000=3.59%
+    section 86   nodes=623  leaves=533  depth=6  | heads=533  records=1262 badHeads=0 broken=34  snapped=499 | tris=66453 idx 0..16337 edge p50=127   p99=51245 max=86534 over2000=4.52%
+    section 131  nodes=141  leaves=112  depth=4  | heads=112  records=491  badHeads=0 broken=8   snapped=104 | tris=5857  idx 0..9304  edge p50=169   p99=56995 max=86534 over2000=6.50%
+    section 140  nodes=98   leaves=83   depth=3  | heads=83   records=408  badHeads=0 broken=6   snapped=77  | tris=7538  idx 0..9542  edge p50=167   p99=56881 max=83400 over2000=5.73%
+    section 165  nodes=80   leaves=68   depth=4  | heads=68   records=346  badHeads=0 broken=5   snapped=63  | tris=4806  idx 0..6536  edge p50=200   p99=58918 max=86534 over2000=7.86%
+    section 190  nodes=91   leaves=79   depth=3  | heads=79   records=260  badHeads=0 broken=6   snapped=73  | tris=5117  idx 0..6177  edge p50=206   p99=60316 max=79573 over2000=8.53%
+    section 197  nodes=35   leaves=28   depth=3  | heads=28   records=36   badHeads=0 broken=3   snapped=25  | tris=2182  idx 0..2253  edge p50=428   p99=63551 max=86534 over2000=29.77%
+    section 200  nodes=69   leaves=52   depth=3  | heads=52   records=52   badHeads=0 broken=4   snapped=48  | tris=126   idx 0..233   edge p50=9926  p99=63698 max=63707 over2000=91.80%
+    section 215  nodes=9    leaves=8    depth=1  | heads=8    records=8    badHeads=0 broken=1   snapped=7   | tris=112   idx 0..114   edge p50=6934  p99=59196 max=62096 over2000=88.10%
+    vertices reached by these chains: 16338 of 149077 in section 0
+
+Two things fall out of that table. What the chains index is **the contiguous front of section 0**: every tree's indices run
+from 0 up to its own maximum, the largest maximum being 16,337, and exactly 16,338 distinct vertices are touched - so these
+nine trees address one compact block at the start of the level array, and §14's question "which vertex base" narrows to
+whether a per-material `vbBaseOffset` (prior art `tr7/game/terrain.h:67-74`) offsets indices *inside* that block [S]. The
+75 structurally-failing headers above are the same kind of evidence pointing the other way.
+
+Second, edge length stays bimodal per record, not per decode: the six trees with the most chains have median longest edges
+of 63-206 world units and 3.6-8.5% of edges over 2,000, while sections 200 and 215 - two to three triangles per record -
+sit at medians 9,926 and 6,934 with ~90% over 2,000 [V-data]. Those are whole records whose every triangle is coarse, which
+no linking rule can fix; `--walk=true` still settles on one of them (again an edge of ~13.8k units), so the app keeps
+saying at Warn level that walked heights measure this decode rather than shipped ground. Settling it means what §14 pointed
+at: the terrain-group load path in `tra.exe`, where the game patches strip indices and material bases as a unit is loaded.

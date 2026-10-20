@@ -117,13 +117,14 @@ TEST(DrmFile, parsesTextureGeneralAndTailSentinel) {
     const auto relocs = drm.relocations(texture);
     ASSERT_EQ(relocs.size(), 2u);
     EXPECT_EQ(oa::cdc::relocKind(relocs[0]), 0u);
-    EXPECT_EQ(oa::cdc::relocSectionIndex(relocs[0]), 1u);
+    EXPECT_EQ(relocs[0].kindAndSection >> 3u, 1u);   // wire form stores the section one past our index
+    EXPECT_EQ(oa::cdc::relocSectionIndex(relocs[0]), 0u);
     EXPECT_EQ(relocs[0].typeSpecific, 0u);
     EXPECT_EQ(relocs[0].siteOffset, 4u);
     // Kind 0 adds the u32 sitting at its own slot; here that is the ASCII "DXT1" the fixture stored.
     EXPECT_EQ(drm.relocAddend(texture, relocs[0]), 0x31545844u);
     EXPECT_EQ(oa::cdc::relocKind(relocs[1]), 2u);
-    EXPECT_EQ(oa::cdc::relocSectionIndex(relocs[1]), 0u);
+    EXPECT_EQ(oa::cdc::relocSectionIndex(relocs[1]), oa::cdc::kNoRelocSection);   // a stored 0 names no section at all
     EXPECT_EQ(relocs[1].typeSpecific, 3u);
     EXPECT_EQ(relocs[1].siteOffset, 8u);
 
@@ -133,7 +134,7 @@ TEST(DrmFile, parsesTextureGeneralAndTailSentinel) {
     const auto generalRelocs = drm.relocations(general);
     ASSERT_EQ(generalRelocs.size(), 1u);
     EXPECT_EQ(oa::cdc::relocKind(generalRelocs[0]), 1u);
-    EXPECT_EQ(oa::cdc::relocSectionIndex(generalRelocs[0]), 5u);
+    EXPECT_EQ(oa::cdc::relocSectionIndex(generalRelocs[0]), 4u);   // stored 5 resolves to directory index 4
 
     // The regression this parser exists to get right: the tail's packed upper bits are not a count.
     const DrmSection& tail = drm.sections()[2];

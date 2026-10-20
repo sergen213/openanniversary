@@ -71,16 +71,33 @@ zero version and has no releases yet.
 - Six `Mesh.*` unit tests; `scripts/ci.sh` now also runs `--mesh` against a real install when `OA_GAME_DIR` is set
   (`OA_MESH_RECORD` overrides the level unit).
 
-- `oa_cdc::decodeTerrainStripChain()` (`src/cdc/Geometry.*`): decodes cdcEngine tr7's terrain strip records out of a general
-  section - 44-byte header (vertexCount at +0, matIdx at +20, nextTexture at +40), u16 index run into the unit's vertex
-  array, chains followed once with cycles broken - gated by two measured tests, index locality and the vertex array's own
-  edge scale, which keep 4,091 of unit `8baf540e`'s 4,774 header-shaped starts (`docs/formats/GEOMETRY.md` §13). Three
-  `TerrainStrips.*` tests pin the chain walk, the cycle guard and both rejections.
-- `oa-game --strips=true`: draws those index lists instead of reading the vertex array as one unindexed run; every other
-  stored general section of the unit is scanned against the chosen vertex array.
+- `src/cdc/TerrainQuery.*`: a uniform-grid query over a decoded mesh returning the highest supporting surface under a foot,
+  with the cell size taken from the mesh's own median edge; five data-free tests pin exact heights (slope interpolation, top
+  floor of two stacked planes, a wall that gives no support, refused inputs, self-derived cell size).
+  `oa-game --walk=true` drives a deterministic point agent over that query - gravity, fixed timestep, logged support per tick
+  and the corners of the triangle it settles on.
+- `oa_cdc::decodeTerrainOctree()` and `decodeTerrainStripChains()` (`src/cdc/Geometry.*`): the level oct-tree walked through a
+  payload of self-relative nodes, and the terrain strip chains its leaves point at - 44-byte header (vertexCount at +0, matIdx
+  at +20, nextTexture at +40), u16 index run into the unit's vertex array. Chains are entered only from a leaf reference and
+  followed through `nextTexture`, each record emitted once however many leaves reach it; `vertexCount` must be a multiple of
+  three within range, its run inside the payload and every index naming a vertex the array holds. A link that names a header
+  four to eight bytes short of a real record - the archive patches those slots like any other pointer and pads odd-length runs,
+  and GEOMETRY.md §16 measured 139 of 750 sampled links sitting exactly four bytes early - steps forward onto that record and
+  counts the step; anything else ends the chain instead of being guessed at. Seven `TerrainStrips.*` tests pin the walk on
+  synthetic payloads: a chain walked to its end, a bad head counted rather than invented, a shared tail emitted once, an index
+  naming a vertex the unit does not have, a link stepped only onto a real header (and one too far ending the chain), a cycle
+  walked once, and a payload holding something else.
+- The off-by-one that hid those chains is fixed in the parser: `relocSectionIndex()` subtracts one from the stored value because
+  the engine numbers sections from 1 (`src/cdc/Drm.hpp`, read out of `FUN_005bca80` case 5), and a stored 0 resolves to
+  `kNoRelocSection` instead of wrapping around. With that numbering every self-referring slot of unit `8baf540e` lands inside its
+  own payload and all 1,620 oct-tree leaf references land on a strip-record header (GEOMETRY.md §15).
+- `oa-game --strips=true`: draws those chain-reached index lists instead of reading the vertex array as one unindexed run. The
+  payload-wide hunt for header-shaped bytes is gone from library, app and tool; `oa-asset terrain --hash 8BAF540E` prints the
+  leaf-driven walk per tree - nodes/leaves/depth, heads, records, bad heads, broken links, steps taken, triangle count, the index
+  range reached and edge percentiles - and refuses to call a payload an oct-tree when its node fields say otherwise.
 
 ### Verified
-- Container unit tests (through CTest; the suite is 33 cases today, these among them): golden path hashes taken from the
+- Container unit tests (through CTest; the suite is 47 cases today, these among them): golden path hashes taken from the
   shipped archive (`pc-w\generalbank.drm` → `0xB3AAAFD6`, `pc-w\lara.drm` → `0x5FF91900`), synthetic stored/zlib/
   raw-deflate records, part-boundary straddling, specialisation-mask selection, unsorted-index rejection, strict typed
   getters, log level filtering.
@@ -172,19 +189,21 @@ zero version and has no releases yet.
   handles leave as eight-byte {u32 handle, u16 type} entries. Eight of those functions were absent from the earlier Ghidra
   export, so `tools/ghidra/scripts/DecompileFunctions.java` now creates a function at an address when none exists and they
   were re-exported into `openanniversary-work/ghidra/decomp`.
-- Terrain strip records decoded from shipped bytes and drawn indexed (`docs/formats/GEOMETRY.md` §13): over unit `8baf540e`,
-  4,774 header-shaped starts in 101 payloads - 236 fail index locality, 447 fail edge scale, 4,091 accepted across 2,638 chain
-  links. Their 245,502 triangles have a median longest edge of 198 world units (p90 536, p99 1,539) against a level extent of
-  55,103x55,225x50,366, **79.8% of their edges are shared with another triangle**, and `matIdx` spans 0-91 with no negative
-  value. The unindexed run reading (§6) shares **zero** edges, so it draws same-sized triangles that are not connected
-  surface: the strip records are the shipped topology. On AMD RX 7900 XTX (RADV NAVI31) with validation on,
-  `oa-game --gameDir=... --mesh=8baf540e --selfCheck=true --strips=true` printed
-  `3882 strip record(s) in 2357 chain link(s): 262733 triangle(s) over 149077 vertex/vertices` and the probe
-  `mesh probe: 4480/9216 pixels covered by 12829 distinct vertex colours, 0 unexplained`. Leaving the `0xFFFF` strip restarts
-  in the triangle list drew spikes to a far vertex (index 65,535 of 149,077), which is why straddling triangles are dropped.
-  Under ASan/UBSan (`-DOA_SANITIZE=ON`) the run leaks exactly what it leaks without `--strips=true` - 50,308 bytes in 914
-  allocations, every stack either `<unknown module>` or a driver-side `strdup` - so the new decode path adds nothing.
-  `scripts/ci.sh` step 2 now passes `--strips=true` whenever `OA_GAME_DIR` is set, so this stays covered.
+- Terrain chains reached through the tree that indexes them, drawn indexed (`docs/formats/GEOMETRY.md` §15, §16): nine payloads
+  of unit `8baf540e` hold oct-trees (sections 77, 86, 131, 140, 165, 190, 197, 200, 215) and all 1,620 of their leaf references
+  land on a strip-record header once `relocSectionIndex()` subtracts the engine's one-based numbering. Before that fix the same
+  walk reported a broken link for every chain (broken equalled leaves in all nine trees); after it, 4,776 records are reached with
+  `badHeads` 0 - 1,511 links stepping four bytes onto their record and 109 naming nothing valid within two words and ending a
+  chain. What those chains index is exactly the contiguous front of section 0: 16,338 distinct vertices, largest index 16,337. On
+  AMD RX 7900 XTX (RADV NAVI31) with validation on, `oa-game --gameDir=... --mesh=8baf540e --selfCheck=true --strips=true` printed
+  `9 terrain tree(s): 1620 leaf reference(s) reached 4776 record(s), drawing 135914 triangle(s) over 149077 vertex/vertices;
+  0 bad head(s), 109 broken link(s), 1511 link(s) stepped onto their record` with the probe `mesh probe: 2194/9216 pixels covered
+  by 12829 distinct vertex colours, 0 unexplained`, and `--walk=true` added `terrain grid: 135914 triangle(s), cell 213.5 units,
+  194x172 cells, y -4534..27613` plus `walk finished: 773 of 900 tick(s) supported`. The agent settles on a record that is coarse
+  throughout - §16 measures two such trees, median longest edges 9,926 and 6,934 world units against 63-206 for the other seven -
+  which is why `--walk=true` logs at Warn level that these heights measure the decode rather than shipped ground.
+  `oa-asset <install> terrain --hash 8BAF540E` reproduces every figure above, and `scripts/ci.sh` passes both game flags whenever
+  `OA_GAME_DIR` is set.
 
 ### Fixed
 

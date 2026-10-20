@@ -4,6 +4,7 @@
 #include "cdc/Bigfile.hpp"
 #include "cdc/Drm.hpp"
 #include "cdc/Geometry.hpp"
+#include "cdc/TerrainQuery.hpp"
 #include "cdc/Texture.hpp"
 #include "core/Config.hpp"
 #include "core/Log.hpp"
@@ -282,30 +283,143 @@ int main(int argc, char** argv) {
         const oa::cdc::MeshBounds bounds = oa::cdc::meshBounds(vertices);
 
 
-        // --strips=true draws the shipped index lists instead of reading the vertex array as one run. Every other stored
-        // general section of the unit is scanned for terrain strip records (GEOMETRY.md §10), and the two gates there keep
-        // the real ones: 79.8% of the triangles' edges end up shared with another triangle, which is what a mesh looks
-        // like (docs/formats/GEOMETRY.md §13). Their u16 indices address this same vertex array, so nothing is repacked.
-        // The oct-tree is not consulted yet, so whole chains are drawn rather than the cells a camera would see.
+        // --strips=true draws the shipped terrain topology rather than reading the vertex array as one run. Each oct-tree
+        // in the unit hands its leaves' references to decodeTerrainStripChains, which follows nextTexture from a leaf's
+        // record instead of guessing where records start: with the section numbering Drm.hpp documents, all 1,620 leaf
+        // references of this unit land on a record header (docs/formats/GEOMETRY.md §15). Culling is not applied yet, so
+        // whole chains are drawn rather than the cells a camera would see.
         std::vector<std::uint32_t> stripIndices;
         if (config.flag("strips", false)) {
+            std::uint32_t trees = 0;
             std::uint32_t records = 0;
-            std::uint32_t chains = 0;
+            std::uint32_t heads = 0;
+            std::uint32_t badHeads = 0;
+            std::uint32_t brokenLinks = 0;
+            std::uint32_t snappedLinks = 0;
             for (std::size_t i = 0; i < drm.sections().size(); ++i) {
-                const oa::cdc::DrmSection& section = drm.sections()[i];
-                if (!section.stored || section.type != 0 || static_cast<int>(i) == chosen) continue;
-                oa::cdc::TerrainStripChain strips;
-                std::string stripError;
-                if (!oa::cdc::decodeTerrainStripChain(drm.payload(section), vertices, &strips, &stripError)) {
-                    OA_LOG(oa::LogLevel::Warn, "app", "section {} of '{}' skipped: {}", i, meshPath, stripError);
-                    continue;
+                const oa::cdc::DrmSection& nodeSection = drm.sections()[i];
+                if (!nodeSection.stored || nodeSection.relocCount == 0) continue;
+                std::map<std::uint32_t, std::pair<std::uint32_t, std::uint32_t>> references;
+                for (const auto& r : drm.relocations(nodeSection)) {
+                    if (oa::cdc::relocKind(r) != 0) continue;   // node fields are patched by kind-0 entries (§9)
+                    references[static_cast<std::uint32_t>(r.siteOffset)] = {
+                        static_cast<std::uint32_t>(oa::cdc::relocSectionIndex(r)), drm.relocAddend(nodeSection, r)};
                 }
-                records += strips.records;
-                chains += strips.chained;
-                stripIndices.insert(stripIndices.end(), strips.indices.begin(), strips.indices.end());
+                oa::cdc::TerrainOctree tree;
+                std::string why;
+                if (!oa::cdc::decodeTerrainOctree(drm.payload(nodeSection), references, &tree, &why)) continue;
+                ++trees;
+                std::map<std::uint32_t, std::vector<std::uint32_t>> headsPerSection;
+                for (const auto& leaf : tree.leafList) {
+                    if (leaf.targetSection >= drm.sections().size()) continue;
+                    headsPerSection[leaf.targetSection].push_back(leaf.offsetInTarget);
+                }
+                for (const auto& entry : headsPerSection) {
+                    const oa::cdc::DrmSection& strip = drm.sections()[entry.first];
+                    if (!strip.stored) continue;
+                    oa::cdc::TerrainStripChain walked;
+                    std::string chainError;
+                    if (!oa::cdc::decodeTerrainStripChains(drm.payload(strip), entry.second, vertices.size(), &walked,
+                                                           &chainError)) {
+                        OA_LOG(oa::LogLevel::Warn, "app", "section {} of '{}' chains skipped: {}", entry.first, meshPath,
+                               chainError);
+                        continue;
+                    }
+                    records += walked.records;
+                    heads += walked.heads;
+                    badHeads += walked.badHeads;
+                    brokenLinks += walked.brokenLinks;
+                    snappedLinks += walked.snappedLinks;
+                    stripIndices.insert(stripIndices.end(), walked.indices.begin(), walked.indices.end());
+                }
             }
-            OA_LOG(oa::LogLevel::Info, "app", "{} strip record(s) in {} chain link(s): {} triangle(s) over {} vertex/vertices",
-                   records, chains, stripIndices.size() / 3u, vertices.size());
+            OA_LOG(oa::LogLevel::Info, "app", "{} terrain tree(s): {} leaf reference(s) reached {} record(s), drawing "
+                                              "{} triangle(s) over {} vertex/vertices; {} bad head(s), {} broken link(s), "
+                                              "{} link(s) stepped onto their record",
+                   trees, heads, records, stripIndices.size() / 3u, vertices.size(), badHeads, brokenLinks, snappedLinks);
+        }
+
+        // --walk=true sends a point agent over the decoded strip geometry before any frame is drawn: gravity pulls it down,
+        // the query answers with the highest surface under its foot, and the run logs where it stood. Speed and gravity are
+        // placeholders - Milestone 5 replaces them with Lara's values from tra.exe. The heights are only as good as the
+        // strip topology behind them, which is not settled: GEOMETRY.md §16 measures what walking over it exposes.
+        if (config.flag("walk", false)) {
+            if (stripIndices.empty()) {
+                OA_LOG(oa::LogLevel::Error, "app", "--walk needs --strips=true: walking reads the strip index lists");
+                return 2;
+            }
+            oa::cdc::TerrainQuery terrain;
+            std::string queryError;
+            if (!terrain.build(vertices, stripIndices, {}, &queryError)) {
+                OA_LOG(oa::LogLevel::Error, "app", "cannot build the terrain query: {}", queryError);
+                return 2;
+            }
+            OA_LOG(oa::LogLevel::Info, "app", "terrain grid: {} triangle(s), cell {:.1f} units, {}x{} cells, y {:.0f}..{:.0f}",
+                   terrain.triangleCount(), terrain.cellSize(), terrain.cellsX(), terrain.cellsZ(),
+                   terrain.boundsMin()[1], terrain.boundsMax()[1]);
+            OA_LOG(oa::LogLevel::Warn, "app", "the surface under foot comes from strip index lists whose vertex base is not "
+                                              "established (GEOMETRY.md §16): these heights measure the decode, not shipped ground");
+
+            constexpr float kStep = 1.0f / 60.0f;    // fixed timestep, so the run repeats exactly
+            constexpr std::uint32_t kTicks = 900u;   // fifteen seconds
+            constexpr float kSpeed = 400.0f;         // world units per second along +x
+            constexpr float kGravity = -2000.0f;     // world units per second squared
+            constexpr float kStepUp = 12.0f;         // a foot may climb this far without being blocked
+
+            const float midX = (terrain.boundsMin()[0] + terrain.boundsMax()[0]) * 0.5f;
+            const float midZ = (terrain.boundsMin()[2] + terrain.boundsMax()[2]) * 0.5f;
+            float x = midX;
+            float z = midZ;
+            float y = terrain.boundsMax()[1] + 50.0f;   // start above everything and fall onto the level
+            float vy = 0.0f;
+            std::uint32_t groundedTicks = 0;
+            std::uint32_t blocked = 0;
+            bool fellOut = false;
+            oa::cdc::TerrainHit lastHit;
+            bool haveLastHit = false;
+            std::uint32_t tick = 0;
+            for (; tick < kTicks; ++tick) {
+                vy += kGravity * kStep;
+                float nextY = y + vy * kStep;
+                oa::cdc::TerrainHit hit;
+                const bool support = terrain.surfaceAt(x, z, nextY, kStepUp, &hit);
+                if (support) { lastHit = hit; haveLastHit = true; }
+                if (support && vy <= 0.0f && nextY <= hit.y + kStepUp) {
+                    nextY = hit.y;   // resting on the surface
+                    vy = 0.0f;
+                    groundedTicks += 1u;
+                }
+                y = nextY;
+                if (y < terrain.boundsMin()[1] - 200.0f) {
+                    fellOut = true;
+                    OA_LOG(oa::LogLevel::Error, "app", "walk tick {}: agent fell through the floor at ({:.0f}, {:.0f})", tick, x, z);
+                    break;
+                }
+                if (x + kSpeed * kStep <= terrain.boundsMax()[0]) {
+                    x += kSpeed * kStep;
+                } else {
+                    blocked += 1u;   // the mesh ends: standing still for the rest of the run
+                }
+                if (tick % 150u == 0u || tick + 1u == kTicks) {
+                    if (support) {
+                        OA_LOG(oa::LogLevel::Info, "app", "walk tick {}: agent ({:.1f}, {:.1f}, {:.1f}) ground {:.1f} "
+                                                         "(triangle {})", tick, x, y, z, hit.y, hit.triangle);
+                    } else {
+                        OA_LOG(oa::LogLevel::Info, "app", "walk tick {}: agent ({:.1f}, {:.1f}, {:.1f}) ground none",
+                               tick, x, y, z);
+                    }
+                }
+            }
+            OA_LOG(oa::LogLevel::Info, "app", "walk finished: {} of {} tick(s) supported, {} blocked at the edge, final "
+                                              "({:.1f}, {:.1f}, {:.1f})", groundedTicks, tick, blocked, x, y, z);
+            if (haveLastHit) {
+                float corners[9];
+                terrain.triangleCorners(lastHit.triangle, corners);
+                OA_LOG(oa::LogLevel::Info, "app", "settled on triangle {}: ({:.0f}, {:.0f}, {:.0f}) ({:.0f}, {:.0f}, {:.0f}) "
+                                                 "({:.0f}, {:.0f}, {:.0f})", lastHit.triangle, corners[0], corners[1], corners[2],
+                       corners[3], corners[4], corners[5], corners[6], corners[7], corners[8]);
+            }
+            if (fellOut) return 2;
         }
 
         oa::render::MeshUpload mesh;

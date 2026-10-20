@@ -232,64 +232,122 @@ std::vector<std::byte> strip(std::uint32_t vertexCount, std::int32_t matIdx, std
     return out;
 }
 
-// A vertex array along a straight line, ten units apart. Index runs over it are local and their triangles short, which is
-// what the two measured gates in Geometry.hpp look for.
-std::vector<MeshVertex> lineVertices(std::size_t count) {
-    std::vector<MeshVertex> out;
-    for (std::size_t i = 0; i < count; ++i) {
-        MeshVertex vertex;
-        vertex.x = static_cast<std::int16_t>(10u * i);
-        out.push_back(vertex);
-    }
-    return out;
+
+TEST(TerrainStrips, walksAChainFromALeafHead) {
+    // A at 0 holds three indices and chains to B at 50 (44 header bytes + 6 index bytes); B ends the chain with a null
+    // nextTexture. Stored order is kept and repeated indices are drawn as stored - prior art draws them, and TerrainQuery
+    // ignores a zero-area triangle rather than tripping over it.
+    const std::vector<std::byte> payload = join({strip(3, 7, 50u, {0, 1, 2}), strip(6, 9, 0u, {3, 4, 5, 3, 5, 6})});
+    const std::uint32_t heads[] = {0u};
+    TerrainStripChain walked;
+    std::string error;
+    ASSERT_TRUE(oa::cdc::decodeTerrainStripChains(payload, heads, 64u, &walked, &error)) << error;
+    EXPECT_EQ(walked.records, 2u);
+    EXPECT_EQ(walked.heads, 1u);
+    EXPECT_EQ(walked.badHeads, 0u);
+    EXPECT_EQ(walked.brokenLinks, 0u);
+    EXPECT_EQ(walked.indices, (std::vector<std::uint32_t>{0, 1, 2, 3, 4, 5, 3, 5, 6}));
+    EXPECT_EQ(walked.materialOfTriangle, (std::vector<std::int32_t>{7, 9, 9}));
 }
 
-TEST(TerrainStrips, chainsRecordsAndDropsDegenerateRestarts) {
-    // A at 0 with four indices chains to B at 52 (44 header + 8 index bytes). The repeated index 2 in A is the restart
-    // between two strips of the same run, so it yields no triangle.
-    const std::vector<std::byte> payload = join({strip(4, 7, 52u, {0, 1, 2, 2}), strip(3, 9, 0xFFFFFFFFu, {3, 4, 5})});
-    TerrainStripChain strips;
+TEST(TerrainStrips, countsAHeadThatIsNotARecordInsteadOfGuessing) {
+    // The leaf reference points past the end of this payload. Nothing is invented to cover for it: the head is counted and
+    // no triangle comes out. §13/§14's scan-era code did the opposite - it found *some* header-shaped bytes nearby and
+    // drew them, which is where the long joins came from.
+    const std::vector<std::byte> payload = strip(3, 7, 0u, {0, 1, 2});
+    const std::uint32_t heads[] = {4096u};
+    TerrainStripChain walked;
     std::string error;
-    ASSERT_TRUE(oa::cdc::decodeTerrainStripChain(payload, lineVertices(8), &strips, &error)) << error;
-    EXPECT_EQ(strips.records, 2u);
-    EXPECT_EQ(strips.chained, 1u);
-    EXPECT_EQ(strips.indices, (std::vector<std::uint32_t>{0, 1, 2, 3, 4, 5}));
-    EXPECT_EQ(strips.materialOfTriangle, (std::vector<std::int32_t>{7, 9}));
+    ASSERT_TRUE(oa::cdc::decodeTerrainStripChains(payload, heads, 64u, &walked, &error)) << error;
+    EXPECT_EQ(walked.records, 0u);
+    EXPECT_EQ(walked.badHeads, 1u);
+    EXPECT_TRUE(walked.indices.empty());
+}
+
+TEST(TerrainStrips, emitsASharedTailOnce) {
+    // Two leaves reach the same chain at different points; the records they share must be drawn once. B at 50 is named by
+    // both head 0 (through A's nextTexture) and head 50 itself.
+    const std::vector<std::byte> payload = join({strip(3, 7, 50u, {0, 1, 2}), strip(3, 9, 0u, {3, 4, 5})});
+    const std::uint32_t heads[] = {0u, 50u};
+    TerrainStripChain walked;
+    std::string error;
+    ASSERT_TRUE(oa::cdc::decodeTerrainStripChains(payload, heads, 64u, &walked, &error)) << error;
+    EXPECT_EQ(walked.records, 2u);   // A and B, not A+B+B
+    EXPECT_EQ(walked.heads, 2u);
+    EXPECT_EQ(walked.indices.size(), 6u);
+}
+
+TEST(TerrainStrips, refusesARecordNamingVerticesTheUnitDoesNotHave) {
+    // A header-shaped start whose index run reaches past the vertex array is not a record of this unit: here it is the head
+    // itself that fails, so nothing is drawn and the head is counted as bad.
+    const std::vector<std::byte> payload = strip(3, 2, 0u, {0, 1, 9});
+    const std::uint32_t heads[] = {0u};
+    TerrainStripChain rejected;
+    std::string error;
+    ASSERT_TRUE(oa::cdc::decodeTerrainStripChains(payload, heads, 8u, &rejected, &error)) << error;
+    EXPECT_EQ(rejected.records, 0u);
+    EXPECT_EQ(rejected.badHeads, 1u);
+    EXPECT_TRUE(rejected.indices.empty());
+
+    // The same failure part-way along a chain keeps what came before and names the link that broke.
+    const std::vector<std::byte> chained = join({strip(3, 7, 50u, {0, 1, 2}), strip(3, 4, 0u, {3, 4, 9})});
+    TerrainStripChain partial;
+    ASSERT_TRUE(oa::cdc::decodeTerrainStripChains(chained, heads, 8u, &partial, &error)) << error;
+    EXPECT_EQ(partial.records, 1u);
+    EXPECT_EQ(partial.brokenLinks, 1u);
+    EXPECT_EQ(partial.indices, (std::vector<std::uint32_t>{0, 1, 2}));
 }
 
 TEST(TerrainStrips, walksACycleOnceInsteadOfHanging) {
-    // nextTexture pointing back at the record itself: the walker must claim it once and stop.
-    const std::vector<std::byte> payload = strip(3, 1, 0u, {0, 1, 2});
-    TerrainStripChain strips;
+    // B at 56 points back at itself through nextTexture. Without a visited set this loop never ends; with one, both
+    // records are drawn once and the chain stops. The six filler bytes put B on an even offset like the shipped data.
+    const std::vector<std::byte> payload = join({strip(3, 1, 56u, {0, 1, 2}), std::vector<std::byte>(6),
+                                                 strip(3, 2, 56u, {3, 4, 5})});
+    const std::uint32_t heads[] = {0u};
+    TerrainStripChain walked;
     std::string error;
-    ASSERT_TRUE(oa::cdc::decodeTerrainStripChain(payload, lineVertices(8), &strips, &error)) << error;
-    EXPECT_EQ(strips.records, 1u);
-    EXPECT_EQ(strips.indices, (std::vector<std::uint32_t>{0, 1, 2}));
+    ASSERT_TRUE(oa::cdc::decodeTerrainStripChains(payload, heads, 64u, &walked, &error)) << error;
+    EXPECT_EQ(walked.records, 2u);
+    EXPECT_EQ(walked.indices.size(), 6u);
 }
 
-TEST(TerrainStrips, yieldsNothingForPayloadsThatHoldNoRecords) {
-    TerrainStripChain strips;
+TEST(TerrainStrips, stepsALinkForwardOnlyOntoARealHeader) {
+    // The shipped file form leaves part of these links short of the header they mean (§16 measured 139 of 750 four bytes
+    // early), so A names 52 while its run and padding put B at 56. The walker takes the step, counts it, and draws both.
+    const std::vector<std::byte> shortLink = join({strip(3, 7, 52u, {0, 1, 2}), std::vector<std::byte>(6),
+                                                   strip(3, 9, 0u, {3, 4, 5})});
+    const std::uint32_t heads[] = {0u};
+    TerrainStripChain walked;
     std::string error;
+    ASSERT_TRUE(oa::cdc::decodeTerrainStripChains(shortLink, heads, 64u, &walked, &error)) << error;
+    EXPECT_EQ(walked.records, 2u);
+    EXPECT_EQ(walked.snappedLinks, 1u);
+    EXPECT_EQ(walked.brokenLinks, 0u);
+    EXPECT_EQ(walked.indices.size(), 6u);
 
-    // A vertex run whose first word is far outside the sane record count.
+    // Two words is the measured ceiling: a header further on than that is not this link's record, and guessing past it is
+    // what §13/§14's scan-era decoding did. The chain ends with what it genuinely reached.
+    const std::vector<std::byte> tooFar = join({strip(3, 7, 52u, {0, 1, 2}), std::vector<std::byte>(12),
+                                                strip(3, 9, 0u, {3, 4, 5})});
+    TerrainStripChain stopped;
+    ASSERT_TRUE(oa::cdc::decodeTerrainStripChains(tooFar, heads, 64u, &stopped, &error)) << error;
+    EXPECT_EQ(stopped.records, 1u);
+    EXPECT_EQ(stopped.snappedLinks, 0u);
+    EXPECT_EQ(stopped.brokenLinks, 1u);
+    EXPECT_EQ(stopped.indices.size(), 3u);
+}
+
+TEST(TerrainStrips, yieldsNothingForAPayloadHoldingSomethingElse) {
+    // A plain vertex run handed to the chain walker: its first word is not a plausible record count.
     const std::vector<std::byte> soup = triangle();
-    ASSERT_TRUE(oa::cdc::decodeTerrainStripChain(soup, lineVertices(8), &strips, &error)) << error;
+    const std::uint32_t heads[] = {0u};
+    TerrainStripChain strips;
+    std::string error;
+    ASSERT_TRUE(oa::cdc::decodeTerrainStripChains(soup, heads, 8u, &strips, &error)) << error;
     EXPECT_EQ(strips.records, 0u);
+    EXPECT_EQ(strips.badHeads, 1u);
     EXPECT_TRUE(strips.indices.empty());
-
-    // A header-shaped record whose indices name vertices the unit does not have.
-    const std::vector<std::byte> outOfRange = strip(3, 2, 0xFFFFFFFFu, {0, 1, 9});
-    TerrainStripChain rejected;
-    ASSERT_TRUE(oa::cdc::decodeTerrainStripChain(outOfRange, lineVertices(8), &rejected, &error)) << error;
-    EXPECT_EQ(rejected.records, 0u);
-    EXPECT_EQ(rejected.indices.size(), 0u);
-
-    // Header-shaped and inside the index range, but the values jump around: a strip reuses its neighbours, so this fails
-    // the locality gate instead of being drawn as spikes across the level.
-    const std::vector<std::byte> scattered = strip(4, 3, 0xFFFFFFFFu, {0, 40, 5, 60});
-    TerrainStripChain jumpy;
-    ASSERT_TRUE(oa::cdc::decodeTerrainStripChain(scattered, lineVertices(64), &jumpy, &error)) << error;
-    EXPECT_EQ(jumpy.records, 0u);
 }
+
 
 }  // namespace
