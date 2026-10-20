@@ -19,6 +19,7 @@ using oa::cdc::MeshBounds;
 using oa::cdc::MeshVertex;
 using oa::cdc::TerrainLeaf;
 using oa::cdc::TerrainOctree;
+using oa::cdc::TerrainStripChain;
 
 void putI16(std::vector<std::byte>& out, std::int16_t value) {
     const auto raw = static_cast<std::uint16_t>(value);
@@ -214,6 +215,81 @@ TEST(TerrainOctree, refusesTreesItCannotTrust) {
     const auto unlinked = join({node(0, 2, {32u, 56u}), node(0x1234, 0, {}), node(0x5678, 0, {})});
     EXPECT_FALSE(oa::cdc::decodeTerrainOctree(unlinked, {}, &tree, &error));
     EXPECT_NE(error.find("no relocation reference"), std::string::npos) << error;
+}
+
+// One terrain strip record (GEOMETRY.md §10): the header is 44 bytes with vertexCount at +0, matIdx at +20 and
+// nextTexture at +40; only those three are read here. The rest of the header stays zero because the decoder does not use it.
+std::vector<std::byte> strip(std::uint32_t vertexCount, std::int32_t matIdx, std::uint32_t nextTexture,
+                             const std::vector<std::uint16_t>& indices) {
+    std::vector<std::byte> out;
+    putU32(out, vertexCount);
+    for (int i = 0; i < 4; ++i) putU32(out, 0);              // +4 .. +16
+    putU32(out, static_cast<std::uint32_t>(matIdx));         // +20
+    for (int i = 0; i < 4; ++i) putU32(out, 0);              // +24 .. +36
+    putU32(out, nextTexture);                                // +40
+    EXPECT_EQ(out.size(), 44u);
+    for (std::uint16_t index : indices) putU16(out, index);
+    return out;
+}
+
+// A vertex array along a straight line, ten units apart. Index runs over it are local and their triangles short, which is
+// what the two measured gates in Geometry.hpp look for.
+std::vector<MeshVertex> lineVertices(std::size_t count) {
+    std::vector<MeshVertex> out;
+    for (std::size_t i = 0; i < count; ++i) {
+        MeshVertex vertex;
+        vertex.x = static_cast<std::int16_t>(10u * i);
+        out.push_back(vertex);
+    }
+    return out;
+}
+
+TEST(TerrainStrips, chainsRecordsAndDropsDegenerateRestarts) {
+    // A at 0 with four indices chains to B at 52 (44 header + 8 index bytes). The repeated index 2 in A is the restart
+    // between two strips of the same run, so it yields no triangle.
+    const std::vector<std::byte> payload = join({strip(4, 7, 52u, {0, 1, 2, 2}), strip(3, 9, 0xFFFFFFFFu, {3, 4, 5})});
+    TerrainStripChain strips;
+    std::string error;
+    ASSERT_TRUE(oa::cdc::decodeTerrainStripChain(payload, lineVertices(8), &strips, &error)) << error;
+    EXPECT_EQ(strips.records, 2u);
+    EXPECT_EQ(strips.chained, 1u);
+    EXPECT_EQ(strips.indices, (std::vector<std::uint32_t>{0, 1, 2, 3, 4, 5}));
+    EXPECT_EQ(strips.materialOfTriangle, (std::vector<std::int32_t>{7, 9}));
+}
+
+TEST(TerrainStrips, walksACycleOnceInsteadOfHanging) {
+    // nextTexture pointing back at the record itself: the walker must claim it once and stop.
+    const std::vector<std::byte> payload = strip(3, 1, 0u, {0, 1, 2});
+    TerrainStripChain strips;
+    std::string error;
+    ASSERT_TRUE(oa::cdc::decodeTerrainStripChain(payload, lineVertices(8), &strips, &error)) << error;
+    EXPECT_EQ(strips.records, 1u);
+    EXPECT_EQ(strips.indices, (std::vector<std::uint32_t>{0, 1, 2}));
+}
+
+TEST(TerrainStrips, yieldsNothingForPayloadsThatHoldNoRecords) {
+    TerrainStripChain strips;
+    std::string error;
+
+    // A vertex run whose first word is far outside the sane record count.
+    const std::vector<std::byte> soup = triangle();
+    ASSERT_TRUE(oa::cdc::decodeTerrainStripChain(soup, lineVertices(8), &strips, &error)) << error;
+    EXPECT_EQ(strips.records, 0u);
+    EXPECT_TRUE(strips.indices.empty());
+
+    // A header-shaped record whose indices name vertices the unit does not have.
+    const std::vector<std::byte> outOfRange = strip(3, 2, 0xFFFFFFFFu, {0, 1, 9});
+    TerrainStripChain rejected;
+    ASSERT_TRUE(oa::cdc::decodeTerrainStripChain(outOfRange, lineVertices(8), &rejected, &error)) << error;
+    EXPECT_EQ(rejected.records, 0u);
+    EXPECT_EQ(rejected.indices.size(), 0u);
+
+    // Header-shaped and inside the index range, but the values jump around: a strip reuses its neighbours, so this fails
+    // the locality gate instead of being drawn as spikes across the level.
+    const std::vector<std::byte> scattered = strip(4, 3, 0xFFFFFFFFu, {0, 40, 5, 60});
+    TerrainStripChain jumpy;
+    ASSERT_TRUE(oa::cdc::decodeTerrainStripChain(scattered, lineVertices(64), &jumpy, &error)) << error;
+    EXPECT_EQ(jumpy.records, 0u);
 }
 
 }  // namespace

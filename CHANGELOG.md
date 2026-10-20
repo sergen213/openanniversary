@@ -71,6 +71,14 @@ zero version and has no releases yet.
 - Six `Mesh.*` unit tests; `scripts/ci.sh` now also runs `--mesh` against a real install when `OA_GAME_DIR` is set
   (`OA_MESH_RECORD` overrides the level unit).
 
+- `oa_cdc::decodeTerrainStripChain()` (`src/cdc/Geometry.*`): decodes cdcEngine tr7's terrain strip records out of a general
+  section - 44-byte header (vertexCount at +0, matIdx at +20, nextTexture at +40), u16 index run into the unit's vertex
+  array, chains followed once with cycles broken - gated by two measured tests, index locality and the vertex array's own
+  edge scale, which keep 4,091 of unit `8baf540e`'s 4,774 header-shaped starts (`docs/formats/GEOMETRY.md` §13). Three
+  `TerrainStrips.*` tests pin the chain walk, the cycle guard and both rejections.
+- `oa-game --strips=true`: draws those index lists instead of reading the vertex array as one unindexed run; every other
+  stored general section of the unit is scanned against the chosen vertex array.
+
 ### Verified
 - Container unit tests (through CTest; the suite is 33 cases today, these among them): golden path hashes taken from the
   shipped archive (`pc-w\generalbank.drm` → `0xB3AAAFD6`, `pc-w\lara.drm` → `0x5FF91900`), synthetic stored/zlib/
@@ -164,6 +172,19 @@ zero version and has no releases yet.
   handles leave as eight-byte {u32 handle, u16 type} entries. Eight of those functions were absent from the earlier Ghidra
   export, so `tools/ghidra/scripts/DecompileFunctions.java` now creates a function at an address when none exists and they
   were re-exported into `openanniversary-work/ghidra/decomp`.
+- Terrain strip records decoded from shipped bytes and drawn indexed (`docs/formats/GEOMETRY.md` §13): over unit `8baf540e`,
+  4,774 header-shaped starts in 101 payloads - 236 fail index locality, 447 fail edge scale, 4,091 accepted across 2,638 chain
+  links. Their 245,502 triangles have a median longest edge of 198 world units (p90 536, p99 1,539) against a level extent of
+  55,103x55,225x50,366, **79.8% of their edges are shared with another triangle**, and `matIdx` spans 0-91 with no negative
+  value. The unindexed run reading (§6) shares **zero** edges, so it draws same-sized triangles that are not connected
+  surface: the strip records are the shipped topology. On AMD RX 7900 XTX (RADV NAVI31) with validation on,
+  `oa-game --gameDir=... --mesh=8baf540e --selfCheck=true --strips=true` printed
+  `3882 strip record(s) in 2357 chain link(s): 262733 triangle(s) over 149077 vertex/vertices` and the probe
+  `mesh probe: 4480/9216 pixels covered by 12829 distinct vertex colours, 0 unexplained`. Leaving the `0xFFFF` strip restarts
+  in the triangle list drew spikes to a far vertex (index 65,535 of 149,077), which is why straddling triangles are dropped.
+  Under ASan/UBSan (`-DOA_SANITIZE=ON`) the run leaks exactly what it leaks without `--strips=true` - 50,308 bytes in 914
+  allocations, every stack either `<unknown module>` or a driver-side `strdup` - so the new decode path adds nothing.
+  `scripts/ci.sh` step 2 now passes `--strips=true` whenever `OA_GAME_DIR` is set, so this stays covered.
 
 ### Fixed
 

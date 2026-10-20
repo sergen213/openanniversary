@@ -114,6 +114,12 @@ Four independent checks, because "it drew something" is not evidence:
   level silhouette with facet colours and depth occlusion, but it cannot serve as the byte check: KDE's compositor remaps
   window pixels, so not one of the ~540k window pixels equalled a shipped byte exactly here. Capture for shape, probe for
   bytes (`docs/formats/GEOMETRY.md` §6).
+* **Indexed terrain strips** — `oa-game --gameDir="<install>" --mesh=8baf540e --selfCheck=true --strips=true` decodes the
+  unit's strip records and uploads them as an index buffer instead of reading the vertex array three records at a time: log
+  line `3882 strip record(s) in 2357 chain link(s): 262733 triangle(s) over 149077 vertex/vertices`, probe
+  `mesh probe: 4480/9216 pixels covered by 12829 distinct vertex colours, 0 unexplained`. The topology evidence - 79.8% of the
+  triangles' edges shared with another triangle against 0% for the unindexed run - is measured in
+  `docs/formats/GEOMETRY.md` §13; nothing culls yet, so every chain in the unit draws.
 
 Validation-layer runs must be clean apart from the host's stale `liblsfg-vk-layer.so` loader messages documented in
 `docs/ENVIRONMENT.md`; anything else is a bug to fix, not to suppress.

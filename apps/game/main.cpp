@@ -282,6 +282,32 @@ int main(int argc, char** argv) {
         const oa::cdc::MeshBounds bounds = oa::cdc::meshBounds(vertices);
 
 
+        // --strips=true draws the shipped index lists instead of reading the vertex array as one run. Every other stored
+        // general section of the unit is scanned for terrain strip records (GEOMETRY.md §10), and the two gates there keep
+        // the real ones: 79.8% of the triangles' edges end up shared with another triangle, which is what a mesh looks
+        // like (docs/formats/GEOMETRY.md §13). Their u16 indices address this same vertex array, so nothing is repacked.
+        // The oct-tree is not consulted yet, so whole chains are drawn rather than the cells a camera would see.
+        std::vector<std::uint32_t> stripIndices;
+        if (config.flag("strips", false)) {
+            std::uint32_t records = 0;
+            std::uint32_t chains = 0;
+            for (std::size_t i = 0; i < drm.sections().size(); ++i) {
+                const oa::cdc::DrmSection& section = drm.sections()[i];
+                if (!section.stored || section.type != 0 || static_cast<int>(i) == chosen) continue;
+                oa::cdc::TerrainStripChain strips;
+                std::string stripError;
+                if (!oa::cdc::decodeTerrainStripChain(drm.payload(section), vertices, &strips, &stripError)) {
+                    OA_LOG(oa::LogLevel::Warn, "app", "section {} of '{}' skipped: {}", i, meshPath, stripError);
+                    continue;
+                }
+                records += strips.records;
+                chains += strips.chained;
+                stripIndices.insert(stripIndices.end(), strips.indices.begin(), strips.indices.end());
+            }
+            OA_LOG(oa::LogLevel::Info, "app", "{} strip record(s) in {} chain link(s): {} triangle(s) over {} vertex/vertices",
+                   records, chains, stripIndices.size() / 3u, vertices.size());
+        }
+
         oa::render::MeshUpload mesh;
         // The buffer is the payload itself: the vertex layout is identical, so there is nothing to repack.
         mesh.bytes = payload.data();
@@ -290,6 +316,7 @@ int main(int argc, char** argv) {
             mesh.boundsMin[axis] = bounds.min[axis];
             mesh.boundsMax[axis] = bounds.max[axis];
         }
+        mesh.indices = stripIndices.empty() ? nullptr : &stripIndices;
         if (!renderer.uploadMesh(mesh, &error)) {
             OA_LOG(oa::LogLevel::Error, "app", "cannot upload the triangle run: {}", error);
             return 2;

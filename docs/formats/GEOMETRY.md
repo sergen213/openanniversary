@@ -319,3 +319,41 @@ written out as eight-byte entries: u32 handle plus u16 resource type (`iVar19 +=
 **[V]**. Those records are not terrain vertices - nothing in this path reads a u16 index array - so §10's strip indices stay
 a game-code concern, read straight from the record body as prior art's `TerrainTextureStripInfo.stripVertex[1]` suggests
 **[S]**.
+
+## 13. Drawing the strip records indexed, and why §6's run is not the topology, measured [V-data] [V-gpu]
+
+Header shape alone admits noise, so `decodeTerrainStripChain()` gates every candidate start with two tests taken from the
+data rather than a constant: **index locality** (at least seven in ten consecutive pairs within eight places of each other -
+a strip reuses its neighbours) and **edge scale** (the record's median longest triangle below four times the median longest
+edge of the vertex array's own consecutive triples, sampled to 4,096 triangles). Census over unit `8baf540e`, same payload
+extraction as §10 [V-data]:
+
+    header-shaped starts             4774   in 101 payloads
+    rejected by index locality        236
+    rejected by edge scale            447
+    accepted records                 4091   (chain links among them: 2638)
+    array scale / gate limit       edge 172.7 -> reject above 690.6 world units
+
+The accepted records draw 245,502 triangles [V-data]: longest edge median **198** world units, p90 536, p99 1,539, against a
+level extent of 55,103 x 55,225 x 50,366. **79.8% of their edges are shared with another triangle** (one edge is reused by
+45 triangles where strips meet). Their `matIdx` takes 92 distinct values, all in 0-91, none negative - material indices into
+the unit's texture set, not garbage. The unindexed run reading of §6 shares **zero** edges: three consecutive records give
+triangles of exactly the right size that are connected to nothing. Section 0 is a vertex array; these index lists are the
+shipped topology [V-data].
+
+One hazard measured on the GPU rather than in a notebook [V-gpu]: `0xFFFF` ends a strip inside an index run, and leaving
+those words in the triangle list draws spikes across the whole level - with 149,077 vertices, index 65,535 is a valid vertex
+sitting far away. The decoder keeps restarts as stored and drops any triangle straddling one; before that fix the same
+payloads rendered as a starburst.
+
+    oa-game --gameDir="<install>" --mesh=8baf540e --selfCheck=true --strips=true
+    3882 strip record(s) in 2357 chain link(s): 262733 triangle(s) over 149077 vertex/vertices
+    mesh probe: 4480/9216 pixels covered by 12829 distinct vertex colours, 0 unexplained
+
+The binary's own counts sit a little off the python census above (3,882 records walked against 4,091 accepted starts); a
+handful of borderline records fall on either side of the edge gate depending on how an even-length sample takes its median.
+Both agree on what matters: nearly all header-shaped starts in terrain payloads are real strips.
+
+Open after this: which texture a `matIdx` selects (92 values against the unit's type-5 sections), how oct-tree leaves choose
+a sub-run inside these chains - §10 measured 15 of 16 addends landing *inside* an accepted record's index array rather than
+on its header - and culling, since every chain in the unit draws whether the camera sees it or not.

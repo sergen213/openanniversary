@@ -83,4 +83,35 @@ bool decodeTerrainOctree(std::span<const std::byte> payload,
                          TerrainOctree* out, std::string* error = nullptr);
 
 
+// Terrain strip records inside a type-0 payload (GEOMETRY.md §10), matching cdcEngine tr7's
+// `TerrainTextureStripInfo` (`tr7/game/terrain.h:46`): a 44-byte header with vertexCount i32 at +0, matIdx i32 at +20 and
+// nextTexture u32 at +40, then `vertexCount` little-endian u16 indices into the unit's stride-20 vertex array. A record's
+// nextTexture is an absolute byte offset inside the same payload naming another record, so records chain.
+//
+// Header shape alone admits far too much: scanning every stored general section of unit 8baf540e finds thousands of
+// header-shaped starts whose indices address unrelated bytes - their triangles measure ~21,000 world units against the
+// shipped run's median longest edge of 146 [V-data]. Two measured gates separate them (docs/formats/GEOMETRY.md §13):
+//   * locality: a triangle strip reuses its neighbours, so in a real index run consecutive values sit close together. Of
+//     the records whose triangles are geometry, 98% have at least seven in ten consecutive pairs within eight places; of
+//     the records that are not geometry, 56% clear that bar **[V-data]**.
+//   * edge scale: the record's own median longest triangle edge must stay below `kStripEdgeScaleFactor` times the scale of
+//     the vertex array it indexes - the same consecutive-triple median §1 measured on that array, so the threshold comes
+//     from the unit rather than a constant. Good records sit at 200-300 units, rejected ones at thousands **[V-data]**.
+// Chains expand to triangles with the degenerate restarts dropped (an index repeated next to itself, §9). A payload that
+// holds something else yields no records; nothing is guessed.
+inline constexpr float kStripLocalityFraction = 0.7f;
+inline constexpr float kStripEdgeScaleFactor = 4.0f;
+
+struct TerrainStripChain {
+    std::vector<std::uint32_t> indices;                      // triangle list: three per triangle
+    std::vector<std::int32_t> materialOfTriangle;            // one matIdx per triangle, same order
+    std::uint32_t records = 0;                               // accepted records in this payload
+    std::uint32_t chained = 0;                               // whose nextTexture names another record here
+};
+
+// `vertices` is the unit's own vertex array, which the indices address. The call succeeds whenever the payload could be
+// scanned: `out->records == 0` is the honest answer for a payload that holds something else.
+bool decodeTerrainStripChain(std::span<const std::byte> payload, std::span<const MeshVertex> vertices,
+                             TerrainStripChain* out, std::string* error = nullptr);
+
 }  // namespace oa::cdc
