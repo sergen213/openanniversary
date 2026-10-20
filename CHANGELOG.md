@@ -49,8 +49,9 @@ zero version and has no releases yet.
   ```
 
   A desktop capture taken during that run shows the window filled with exactly the clear colour: the configured linear
-  `(0.10, 0.35, 0.62)` appears as sRGB `#59A0CF` over a 1848x1533 device-pixel area (the 1600x900 logical window at 2x
-  HiDPI), matching the requested size and colour. With validation enabled the only reported messages are the host's
+  `(0.10, 0.35, 0.62)` is stored as sRGB `#59A0CF`, and the largest solid block of that colour in the grab measures
+  exactly 1600x893 px at (1120, 649) — the requested client size at scale factor 1, a few bottom rows hidden by the
+  desktop panel. With validation enabled the only reported messages are the host's
   stale `liblsfg-vk-layer.so` loader entries described in `docs/ENVIRONMENT.md`.
 
 ### Not yet implemented

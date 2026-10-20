@@ -47,3 +47,15 @@ not part of the 2007 release and not used by this project).
 
 Read-only rule: tools open these files with `"rb"` only. Extracted payloads go to a scratch directory outside both
 the install and this repository (`/tmp`).
+
+## Display and visual verification
+
+* KDE Plasma on Wayland (`$WAYLAND_DISPLAY=wayland-1`, compositor `kwin_wayland`); an XWayland bridge answers at
+  `DISPLAY=:0`. SDL3 opens native Wayland windows, so the window/renderer work was verified with no X11 fallback. [V-data]
+* Working screenshot tool: `spectacle -b -n -o out.png` (KDE, via the compositor's D-Bus interface). ImageMagick
+  `import -window root` fails here with "missing an image filename", and this ffmpeg build has no `x11grab` input, so
+  neither is usable for verification. [V-data]
+* Grab at full desktop resolution (3840x2160 here, scale factor 1) and *measure pixels* instead of eyeballing. A plain
+  colour bounding box is misleading because other UI elements share the hue; find the largest solid rectangle of runs
+  instead — for a 1600x900 window that measured exactly 1600x893 px, the missing rows being under the panel. [V-data]
+* An sRGB attachment encodes clear values: linear `(0.10, 0.35, 0.62)` arrives on screen as sRGB `#59A0CF`. [V-data]
