@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cstring>
 #include <limits>
+#include <utility>
+#include <vector>
 
 namespace oa::cdc {
 
@@ -55,6 +57,75 @@ MeshBounds meshBounds(const std::vector<MeshVertex>& vertices) {
     }
     bounds.triangles = static_cast<std::uint32_t>(vertices.size() / 3u);
     return bounds;
+}
+
+namespace {
+
+// Payloads sit at arbitrary byte offsets inside an archive record, so every field is copied out rather than
+// reinterpreted in place.
+std::uint32_t loadU32(const std::byte* at) {
+    std::uint32_t value = 0;
+    std::memcpy(&value, at, sizeof(value));
+    return value;
+}
+
+}  // namespace
+
+bool decodeTerrainOctree(std::span<const std::byte> payload,
+                         const std::map<std::uint32_t, std::pair<std::uint32_t, std::uint32_t>>& references,
+                         TerrainOctree* out, std::string* error) {
+    const auto fail = [&](const std::string& message) {
+        if (error != nullptr) *error = message;
+        return false;
+    };
+    if (out == nullptr) return fail("decodeTerrainOctree needs an output struct");
+    if (payload.size() < 24u) return fail("oct-tree payload is " + std::to_string(payload.size()) + " bytes, too small "
+                                          "for one node (needs at least 24)");
+
+    TerrainOctree tree;
+    std::vector<std::pair<std::uint32_t, unsigned>> stack{{0u, 0u}};   // (node offset, depth)
+    std::vector<bool> visited(payload.size() / 4u + 1u, false);
+    while (!stack.empty()) {
+        const auto [offset, depth] = stack.back();
+        stack.pop_back();
+        if (offset % 4u != 0u || offset / 4u >= visited.size() || visited[offset / 4u]) {
+            return fail("oct-tree node at " + std::to_string(offset) + " was already visited or misaligned");
+        }
+        visited[offset / 4u] = true;
+        if (offset + 24u > payload.size()) {
+            return fail("oct-tree node at " + std::to_string(offset) + " runs past the end of the payload");
+        }
+        const auto childCount = static_cast<std::int32_t>(loadU32(payload.data() + offset + 20u));
+        if (childCount < 0 || childCount > 8) {
+            return fail("oct-tree node at " + std::to_string(offset) + " claims " + std::to_string(childCount)
+                        + " children, outside the measured range 0-8");
+        }
+        tree.nodes += 1;
+        tree.maxDepth = depth > tree.maxDepth ? depth : tree.maxDepth;
+        if (childCount == 0) {
+            const auto reference = references.find(offset + 16u);
+            if (reference == references.end()) {
+                return fail("oct-tree leaf at " + std::to_string(offset) + " has no relocation reference in its +16 slot");
+            }
+            tree.leaves += 1;
+            tree.leafList.push_back({offset, reference->second.first, reference->second.second});
+            continue;
+        }
+        std::uint32_t previous = offset;
+        for (std::int32_t child = 0; child < childCount; ++child) {
+            const std::uint32_t at = offset + 24u + 4u * static_cast<std::uint32_t>(child);
+            const std::uint32_t target = loadU32(payload.data() + at);
+            if (target <= previous || target + 24u > payload.size()) {
+                return fail("oct-tree node at " + std::to_string(offset) + " has a child offset " 
+                            + std::to_string(target) + " outside the payload or out of order");
+            }
+            previous = target;
+            stack.emplace_back(target, depth + 1);
+        }
+    }
+    *out = std::move(tree);
+    if (error != nullptr) error->clear();
+    return true;
 }
 
 }  // namespace oa::cdc

@@ -16,13 +16,17 @@ acceptance evidence exists in this repository; otherwise it says what is missing
 
 ## Open technical questions (tracked here so they do not get lost)
 
-1. Geometry inside units is now a per-content gap, not a container or layout gap. Level units are decoded end to end from
-   shipped bytes: an oct-tree of self-relative nodes in one payload, each leaf's reference relocated into one of 34 sibling
-   sections holding i16 triangle-strip runs over the stride-20 vertex array (`docs/formats/GEOMETRY.md` §9, §2). Type 7 is
-   shared refcounted resource records - script/event entries with embedded paths plus float-bearing blobs - not geometry
-   (§7), and `tra.exe`'s per-type handlers are generic resource plumbing (§5 item 1). Still open: the material/texture-page
-   selection per leaf (section 86 also relocates against a `PCD9` section), model-unit indexing for non-terrain meshes, and
-   what type-10 payloads hold. Next step is parsing the oct-tree/strips in `oa_cdc` and drawing them textured in `oa-game`.
+1. Geometry inside units is now a per-content gap, not a container or layout gap. The level oct-tree is decoded from
+   shipped bytes - self-relative nodes in one payload, each leaf's +16 slot relocated into one of 34 sibling sections
+   (`docs/formats/GEOMETRY.md` §9) - but the earlier reading of those targets as i16 strip runs over the stride-20 vertex
+   array (§2) is refuted: indexed against section 0 they sit at 20-64% RMS longest edge, far from coherent. What those
+   payloads do hold are `TerrainTextureStripInfo` records - a 44-byte header plus u16 indices into section 0 - 4,284 of them
+   in unit `8baf540e`, chaining through `nextTexture` inside one payload and coherent at ~0.4% (§10). Still open: how a leaf
+   reaches those records (only 85 of 1,620 addends land on a record start), what the other payload kinds are, per-leaf
+   material/texture-page selection (section 86 also relocates against a `PCD9` section), why only ~10% of section-0 vertices
+   get indexed, and model-unit indexing for non-terrain meshes. Next step is reading `tra.exe`'s terrain loader through the
+   per-type handler table (`DAT_0088e2b0 + type*4`, §5/§7) instead of inferring from data alone; `oa_cdc` already walks the
+   tree and `oa-asset terrain` prints both measurements.
    Licensing note stands: consulted prior art (cdcEngine tr7, GPL-3.0) is licence-compatible with this GPL-3.0-or-later tree;
    keep attribution if any code is taken.
 2. The five language-flavoured `specMask` groups (≈333 records each) are unconfirmed: identify by extracting one of

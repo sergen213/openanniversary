@@ -532,11 +532,7 @@ bool VkRenderer::renderFrame(std::string* error) {
         vkCmdSetViewport(command, 0, 1, &viewport);
         const VkRect2D scissor{{0, 0}, extent_};
         vkCmdSetScissor(command, 0, 1, &scissor);
-        vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, meshPipeline_);
-        const VkDeviceSize vertexOffset = 0;
-        vkCmdBindVertexBuffers(command, 0, 1, &meshBuffer_, &vertexOffset);
-        pushMeshMatrix(command);
-        vkCmdDraw(command, meshVertexCount_, 1, 0, 0);
+        drawMeshGeometry(command);
     }
 
     if (texture_ != VK_NULL_HANDLE && pipeline_ != VK_NULL_HANDLE) {
@@ -1492,10 +1488,7 @@ bool VkRenderer::sampleInto(VkImage colourAttachment, VkExtent2D size, std::vect
     vkCmdSetScissor(command, 0, 1, &scissor);
     const VkDeviceSize vertexOffset = 0;
     if (drawMesh) {
-        vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, meshPipeline_);
-        vkCmdBindVertexBuffers(command, 0, 1, &meshBuffer_, &vertexOffset);
-        pushMeshMatrix(command);
-        vkCmdDraw(command, meshVertexCount_, 1, 0, 0);
+        drawMeshGeometry(command);
     } else {
         vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
         vkCmdBindVertexBuffers(command, 0, 1, &vertexBuffer_, &vertexOffset);
@@ -1725,6 +1718,19 @@ void VkRenderer::destroyMeshPipeline() {
     meshLayout_ = VK_NULL_HANDLE;
 }
 
+void VkRenderer::drawMeshGeometry(VkCommandBuffer command) const {
+    vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, meshPipeline_);
+    const VkDeviceSize bufferOffset = 0;
+    vkCmdBindVertexBuffers(command, 0, 1, &meshBuffer_, &bufferOffset);
+    pushMeshMatrix(command);
+    if (meshIndexCount_ != 0) {
+        vkCmdBindIndexBuffer(command, meshIndexBuffer_, 0, VK_INDEX_TYPE_UINT32);
+        vkCmdDrawIndexed(command, meshIndexCount_, 1, 0, 0, 0);
+    } else {
+        vkCmdDraw(command, meshVertexCount_, 1, 0, 0);
+    }
+}
+
 bool VkRenderer::uploadMesh(const MeshUpload& mesh, std::string* error) {
     if (device_ == VK_NULL_HANDLE) {
         if (error != nullptr) *error = "renderer not initialised";
@@ -1734,6 +1740,19 @@ bool VkRenderer::uploadMesh(const MeshUpload& mesh, std::string* error) {
         if (error != nullptr) *error = "a triangle run needs at least three vertices";
         return false;
     }
+    const bool indexed = mesh.indices != nullptr && !mesh.indices->empty();
+    if (indexed) {
+        if (mesh.indices->size() % 3u != 0u) {
+            if (error != nullptr) *error = "a triangle list needs whole triangles";
+            return false;
+        }
+        for (const std::uint32_t index : *mesh.indices) {
+            if (index >= mesh.vertexCount) {
+                if (error != nullptr) *error = "an index falls outside the uploaded vertices";
+                return false;
+            }
+        }
+    }
     constexpr std::size_t kRecordBytes = 20;   // docs/formats/GEOMETRY.md §2
     const std::size_t bytes = kRecordBytes * static_cast<std::size_t>(mesh.vertexCount);
 
@@ -1742,6 +1761,11 @@ bool VkRenderer::uploadMesh(const MeshUpload& mesh, std::string* error) {
     meshMemory_ = VK_NULL_HANDLE;
     meshBuffer_ = VK_NULL_HANDLE;
     meshVertexCount_ = 0;
+    if (meshIndexMemory_ != VK_NULL_HANDLE) vkFreeMemory(device_, meshIndexMemory_, nullptr);
+    if (meshIndexBuffer_ != VK_NULL_HANDLE) vkDestroyBuffer(device_, meshIndexBuffer_, nullptr);
+    meshIndexMemory_ = VK_NULL_HANDLE;
+    meshIndexBuffer_ = VK_NULL_HANDLE;
+    meshIndexCount_ = 0;
 
     VkBufferCreateInfo bufferInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     bufferInfo.size = bytes;
@@ -1771,6 +1795,32 @@ bool VkRenderer::uploadMesh(const MeshUpload& mesh, std::string* error) {
     std::memcpy(mapped, mesh.bytes, bytes);
     vkUnmapMemory(device_, meshMemory_);
 
+    if (indexed) {
+        const std::size_t indexBytes = mesh.indices->size() * sizeof(std::uint32_t);
+        VkBufferCreateInfo indexInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        indexInfo.size = indexBytes;
+        indexInfo.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+        indexInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (!check(vkCreateBuffer(device_, &indexInfo, nullptr, &meshIndexBuffer_), "index vkCreateBuffer", error)) {
+            return false;
+        }
+        vkGetBufferMemoryRequirements(device_, meshIndexBuffer_, &requirements);
+        allocate.allocationSize = requirements.size;
+        allocate.memoryTypeIndex = hostVisible == 0xFFFFFFFFu ? 0 : hostVisible;
+        if (!check(vkAllocateMemory(device_, &allocate, nullptr, &meshIndexMemory_), "index vkAllocateMemory", error)) {
+            return false;
+        }
+        if (!check(vkBindBufferMemory(device_, meshIndexBuffer_, meshIndexMemory_, 0), "index vkBindBufferMemory", error)) {
+            return false;
+        }
+        void* indexMapped = nullptr;
+        if (!check(vkMapMemory(device_, meshIndexMemory_, 0, VK_WHOLE_SIZE, 0, &indexMapped), "index vkMapMemory", error)) {
+            return false;
+        }
+        std::memcpy(indexMapped, mesh.indices->data(), indexBytes);
+        vkUnmapMemory(device_, meshIndexMemory_);
+    }
+
     // The camera fits itself to these, so the archive's own numbers are what decide how big the level looks.
     for (int axis = 0; axis < 3; ++axis) {
         meshCentre_[axis] = 0.5f * (mesh.boundsMin[axis] + mesh.boundsMax[axis]);
@@ -1779,6 +1829,7 @@ bool VkRenderer::uploadMesh(const MeshUpload& mesh, std::string* error) {
     }
     if (!(meshRadius_ > 1e-3f)) meshRadius_ = 1.0f;   // a flat or point-like run still needs a finite scale
     meshVertexCount_ = mesh.vertexCount;
+    meshIndexCount_ = indexed ? static_cast<std::uint32_t>(mesh.indices->size()) : 0u;
     if (error != nullptr) error->clear();
     return true;
 }
@@ -1870,6 +1921,11 @@ void VkRenderer::shutdown() {
     meshMemory_ = VK_NULL_HANDLE;
     meshBuffer_ = VK_NULL_HANDLE;
     meshVertexCount_ = 0;
+    if (meshIndexMemory_ != VK_NULL_HANDLE && device_ != VK_NULL_HANDLE) vkFreeMemory(device_, meshIndexMemory_, nullptr);
+    if (meshIndexBuffer_ != VK_NULL_HANDLE && device_ != VK_NULL_HANDLE) vkDestroyBuffer(device_, meshIndexBuffer_, nullptr);
+    meshIndexMemory_ = VK_NULL_HANDLE;
+    meshIndexBuffer_ = VK_NULL_HANDLE;
+    meshIndexCount_ = 0;
     if (commandPool_ != VK_NULL_HANDLE && device_ != VK_NULL_HANDLE) {
         vkDestroyCommandPool(device_, commandPool_, nullptr);
         commandPool_ = VK_NULL_HANDLE;

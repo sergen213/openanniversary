@@ -7,6 +7,8 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <initializer_list>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -15,6 +17,8 @@ namespace {
 using oa::cdc::kMeshVertexBytes;
 using oa::cdc::MeshBounds;
 using oa::cdc::MeshVertex;
+using oa::cdc::TerrainLeaf;
+using oa::cdc::TerrainOctree;
 
 void putI16(std::vector<std::byte>& out, std::int16_t value) {
     const auto raw = static_cast<std::uint16_t>(value);
@@ -144,6 +148,72 @@ TEST(Mesh, boundsOfNoVerticesAreZeroed) {
     EXPECT_EQ(bounds.triangles, 0u);
     EXPECT_FLOAT_EQ(bounds.min[0], 0.0f);
     EXPECT_FLOAT_EQ(bounds.max[2], 0.0f);
+}
+
+
+void putU32(std::vector<std::byte>& out, std::uint32_t value) {
+    for (int i = 0; i < 4; ++i) out.push_back(static_cast<std::byte>((value >> (8u * i)) & 0xFFu));
+}
+
+// One oct-tree node: the four sphere floats are opaque to the walker, then the +16 reference slot, the child count and
+// the self-relative child offsets (GEOMETRY.md §9).
+std::vector<std::byte> node(std::uint32_t reference, std::uint32_t childCount, const std::vector<std::uint32_t>& kids) {
+    std::vector<std::byte> out;
+    for (int i = 0; i < 16; ++i) out.push_back(std::byte{static_cast<std::uint8_t>(i)});
+    putU32(out, reference);
+    putU32(out, childCount);
+    for (std::uint32_t kid : kids) putU32(out, kid);
+    return out;
+}
+
+TEST(TerrainOctree, walksASyntheticTreeAndKeepsLeafReferences) {
+    // Root at 0 with two leaf children at 32 and 56; a leaf carries its reference in the +16 slot, so the map keys are
+    // 48 and 72.
+    std::vector<std::byte> payload = join({node(0, 2, {32u, 56u}), node(0x1234, 0, {}), node(0x5678, 0, {})});
+    ASSERT_EQ(payload.size(), 80u);
+    const std::map<std::uint32_t, std::pair<std::uint32_t, std::uint32_t>> references{
+        {48u, {7u, 480u}},
+        {72u, {9u, 824u}},
+    };
+    TerrainOctree tree;
+    std::string error;
+    ASSERT_TRUE(oa::cdc::decodeTerrainOctree(payload, references, &tree, &error)) << error;
+    EXPECT_EQ(tree.nodes, 3u);
+    EXPECT_EQ(tree.leaves, 2u);
+    EXPECT_EQ(tree.maxDepth, 1u);
+    ASSERT_EQ(tree.leafList.size(), 2u);
+    const auto byNode = [&](std::uint32_t offset) {
+        for (const TerrainLeaf& leaf : tree.leafList) {
+            if (leaf.nodeOffset == offset) return leaf;
+        }
+        ADD_FAILURE() << "no leaf at " << offset;
+        return TerrainLeaf{};
+    };
+    EXPECT_EQ(byNode(32u).targetSection, 7u);
+    EXPECT_EQ(byNode(32u).offsetInTarget, 480u);
+    EXPECT_EQ(byNode(56u).targetSection, 9u);
+    EXPECT_EQ(byNode(56u).offsetInTarget, 824u);
+}
+
+TEST(TerrainOctree, refusesTreesItCannotTrust) {
+    const std::map<std::uint32_t, std::pair<std::uint32_t, std::uint32_t>> references{{48u, {7u, 0u}}, {72u, {9u, 8u}}};
+    std::string error;
+    TerrainOctree tree;
+
+    // A child count outside the measured 0-8 range.
+    const auto tooMany = join({node(0, 9, {}), node(0x1234, 0, {}), node(0x5678, 0, {})});
+    EXPECT_FALSE(oa::cdc::decodeTerrainOctree(tooMany, references, &tree, &error));
+    EXPECT_NE(error.find("outside the measured range"), std::string::npos) << error;
+
+    // Children that are not ascending self-relative offsets.
+    const auto unordered = join({node(0, 2, {56u, 32u}), node(0x1234, 0, {}), node(0x5678, 0, {})});
+    EXPECT_FALSE(oa::cdc::decodeTerrainOctree(unordered, references, &tree, &error));
+    EXPECT_NE(error.find("out of order"), std::string::npos) << error;
+
+    // A leaf whose +16 slot the archive never relocated: inventing a target is worse than refusing.
+    const auto unlinked = join({node(0, 2, {32u, 56u}), node(0x1234, 0, {}), node(0x5678, 0, {})});
+    EXPECT_FALSE(oa::cdc::decodeTerrainOctree(unlinked, {}, &tree, &error));
+    EXPECT_NE(error.find("no relocation reference"), std::string::npos) << error;
 }
 
 }  // namespace

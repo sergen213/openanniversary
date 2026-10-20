@@ -43,9 +43,12 @@ struct TextureUpload {
 
 // One geometry payload ready for upload: the record bytes of a general section, as many whole 20-byte vertices
 // as they hold, plus the bounds the caller measured so the camera can be fitted without walking them again here.
+// `indices`, when present, draws those vertices as a triangle list (the terrain strips of
+// docs/formats/GEOMETRY.md §9); without it the run is drawn straight, three records per triangle.
 struct MeshUpload {
     const void* bytes = nullptr;
     std::uint32_t vertexCount = 0;
+    const std::vector<std::uint32_t>* indices = nullptr;
     float boundsMin[3] = {0.0f, 0.0f, 0.0f};
     float boundsMax[3] = {0.0f, 0.0f, 0.0f};
 };
@@ -119,6 +122,9 @@ private:
     bool createMeshPipeline(std::string* error);
     void destroyMeshPipeline();
     void pushMeshMatrix(VkCommandBuffer command) const;
+    // Binds the mesh pipeline plus its vertex (and index, when there is one) buffers and issues the draw; both the
+    // swapchain pass and the offscreen probe call it.
+    void drawMeshGeometry(VkCommandBuffer command) const;
 
     static VKAPI_ATTR VkBool32 VKAPI_CALL debugMessenger(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
                                                          VkDebugUtilsMessageTypeFlagsEXT type,
@@ -165,6 +171,9 @@ private:
     VkBuffer meshBuffer_ = VK_NULL_HANDLE;
     VkDeviceMemory meshMemory_ = VK_NULL_HANDLE;
     std::uint32_t meshVertexCount_ = 0;
+    VkBuffer meshIndexBuffer_ = VK_NULL_HANDLE;
+    VkDeviceMemory meshIndexMemory_ = VK_NULL_HANDLE;
+    std::uint32_t meshIndexCount_ = 0;
     MeshCamera camera_;
     float meshCentre_[3] = {0.0f, 0.0f, 0.0f};
     float meshRadius_ = 1.0f;

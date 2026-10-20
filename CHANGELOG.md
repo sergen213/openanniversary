@@ -130,15 +130,21 @@ zero version and has no releases yet.
   handler in `tra.exe` (`FUN_005bc830`, vtable `PTR_FUN_00657338`) keeps them in a 32,768-slot refcounted cache (block of
   `size + 0x10`, u16 refcount at +0, data at +0x10). Type 7 is shared resource instances, not model geometry; the handler
   table itself resolves as `DAT_0088e2b0 + type*4` with slot 5 being the texture handler.
-- Level oct-tree and triangle-strip indices decoded from shipped bytes (`docs/formats/GEOMETRY.md` §9): unit `8baf540e`
-  section 86 holds a node array of `{bounding sphere (4 floats), leaf reference u32 at +16, child count s32 at +20, self-
-  relative u32 child offsets}`; walking from offset 0 visits 623 nodes / 533 leaves to depth 6 with no anomalies. All 533
-  leaf reference slots are relocation sites pointing into 34 sibling sections (16 leaves each, addends ascending from 0),
-  and the blocks between consecutive addends are i16 triangle-strip index lists into section 0's stride-20 vertex array:
-  496/530 blocks stay below 149,077 with over half non-zero values, 529/530 satisfy strip vertex reuse, and repeated
-  indices inside a run are the degenerate restarts between strips. The consulted cdcEngine tr7 decompilation (GPL-3.0,
-  licence-compatible; `openanniversary-work/priorart/cdcEngine`) confirms the 20-byte `TerrainRenderVertex` field names and
-  replaces the Legend-only numbers previously carried in §5.
+- Level oct-tree decoded from shipped bytes (`docs/formats/GEOMETRY.md` §9): unit `8baf540e` section 86 holds a node array
+  of `{bounding sphere (4 floats), leaf reference u32 at +16, child count s32 at +20, self-relative u32 child offsets}`;
+  walking from offset 0 visits 623 nodes / 533 leaves to depth 6 with no anomalies. All 533 leaf reference slots are
+  relocation sites pointing into 34 sibling sections (16 leaves each, addends ascending from 0). Reading the blocks between
+  consecutive addends as i16 triangle-strip lists into section 0's stride-20 vertex array has now been measured against
+  geometry and refuted: those runs index nothing coherent - RMS longest edge is 20-64% of the array span for all nine of
+  the unit's oct-trees - so what a leaf reference addresses is open again.
+- Terrain strip records located inside those payloads (`docs/formats/GEOMETRY.md` §10): cdcEngine tr7 (GPL-3.0, consulted
+  as documentation only; `openanniversary-work/priorart/cdcEngine`) describes `TerrainTextureStripInfo`, and the file form
+  matches it - a 44-byte header (vertexCount i32 at +0, matIdx i32 at +20, nextTexture u32 at +40) followed by
+  `vertexCount` little-endian u16 indices into section 0. Measured over unit `8baf540e` with
+  `oa-asset <game-dir> terrain --hash 8BAF540E`: 4,284 records in 101 payloads; 2,827 of their `nextTexture` values land on
+  another accepted record start inside the same payload, so that field is an absolute offset within a payload; the triangles
+  are coherent at ~0.4% RMS. They index 15,724 of 149,077 vertices, and only 85 of 1,620 leaf addends land on a record
+  start, so leaf-to-record linkage, the other payload kinds and the rest of the vertex array stay unresolved.
 
 ### Fixed
 
@@ -158,6 +164,16 @@ zero version and has no releases yet.
   nonexistent `mipLodMaxLevel` next to the real `maxLod`.
 - The graphics pipeline was never rebuilt after swapchain recreation, so a resize left the frame loop without one; it is
   recreated together with its render pass. `VkDescriptorSetLayout` leaked until `vkDestroyDevice`.
+
+### Removed
+
+- `decodeTerrainStrips()` from `oa_cdc` with its tests: its model - that an oct-tree leaf's target section holds one u16
+  index run reaching to the next leaf's offset - is refuted by §10 of `docs/formats/GEOMETRY.md`. The same segmentation now
+  lives in `oa-asset terrain` as a labelled probe, which is what prints the coherence figures that refute it.
+- The oct-tree-driven triangle path in `oa-game`: it indexed vertices through those refuted blocks and so drew spikes
+  instead of level geometry. A level unit's stride-20 array again draws as one unindexed run until §10's open questions are
+  settled; `VkRenderer` keeps the indexed-drawing support its `MeshUpload::indices` field gained, unused until a real
+  index source exists.
 
 ### Not yet implemented
 

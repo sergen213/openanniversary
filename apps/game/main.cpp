@@ -11,7 +11,10 @@
 #include "render/vk/VkRenderer.hpp"
 
 #include <cstdlib>
+#include <algorithm>
 #include <chrono>
+#include <map>
+
 #include <cstdio>
 #include <set>
 #include <vector>
@@ -278,6 +281,7 @@ int main(int argc, char** argv) {
         }
         const oa::cdc::MeshBounds bounds = oa::cdc::meshBounds(vertices);
 
+
         oa::render::MeshUpload mesh;
         // The buffer is the payload itself: the vertex layout is identical, so there is nothing to repack.
         mesh.bytes = payload.data();
@@ -304,6 +308,47 @@ int main(int argc, char** argv) {
 
         // With --self-check the same mesh is drawn offscreen and every lit pixel must be one of the shipped vertex
         // colours: that one pass proves upload, index format, matrix convention and the colour path (docs/TESTING.md).
+        // --meshDump=<path> writes the same offscreen pass as a 24-bit BMP, so the picture can be looked at rather
+        // than only counted. 512 rows of three bytes need no padding (512*3 divides by four).
+        if (const std::string dump = config.str("meshDump"); !dump.empty()) {
+            std::vector<std::byte> pixels;
+            constexpr std::uint32_t kEdge = 512u;
+            if (!renderer.renderMeshOffscreen(&pixels, kEdge, &error)) {
+                OA_LOG(oa::LogLevel::Error, "app", "mesh dump failed: {}", error);
+                return 2;
+            }
+            std::FILE* handle = std::fopen(dump.c_str(), "wb");
+            if (handle == nullptr) {
+                OA_LOG(oa::LogLevel::Error, "app", "cannot write '{}'", dump);
+                return 2;
+            }
+            const auto put32 = [](std::uint8_t* at, std::uint32_t value) {
+                for (int i = 0; i < 4; ++i) at[i] = static_cast<std::uint8_t>(value >> (8u * static_cast<unsigned>(i)));
+            };
+            std::uint8_t header[54]{};
+            header[0] = 'B';
+            header[1] = 'M';
+            put32(header + 2, 54u + 3u * kEdge * kEdge);
+            put32(header + 10, 54u);
+            put32(header + 14, 40u);
+            put32(header + 18, kEdge);
+            put32(header + 22, kEdge);   // positive height: the rows below go bottom-up
+            header[26] = 1;              // colour planes
+            header[28] = 24;             // bits per pixel
+            std::fwrite(header, 1, sizeof(header), handle);
+            std::vector<char> row(3u * kEdge);
+            for (std::uint32_t y = kEdge; y-- > 0;) {
+                for (std::uint32_t x = 0; x < kEdge; ++x) {
+                    const std::size_t at = (static_cast<std::size_t>(y) * kEdge + x) * 4u;
+                    row[3u * x] = static_cast<char>(pixels[at + 2]);   // blue
+                    row[3u * x + 1u] = static_cast<char>(pixels[at + 1]);
+                    row[3u * x + 2u] = static_cast<char>(pixels[at]);   // red
+                }
+                std::fwrite(row.data(), 1, row.size(), handle);
+            }
+            std::fclose(handle);
+            OA_LOG(oa::LogLevel::Info, "app", "mesh dump: {}x{} written to {}", kEdge, kEdge, dump);
+        }
         if (config.flag("selfCheck", false)) {
             std::vector<std::byte> pixels;
             constexpr std::uint32_t kProbeSize = 96u;

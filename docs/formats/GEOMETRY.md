@@ -201,7 +201,7 @@ sections - section 0 is entirely stride-20 vertices (§2) - so the next check is
 116 type-0 payloads, the blocks whose u16 values stay inside the 0-149,077 vertex range and whose counts match strip and
 material records.
 
-## 9. The level oct-tree and its strip indices, measured [V-data]
+## 9. The level oct-tree and its leaf references, measured [V-data]
 
 Section 86 of unit `8baf540e` (22,288 bytes) is the terrain group's oct-tree in file form. A node is:
 
@@ -226,18 +226,52 @@ Every leaf's +16 slot is a relocation entry - **533 leaves, 533 sites** - and th
 sections; each of those sections is referenced by exactly 16 leaves, whose addends start at 0 and ascend, so a leaf's
 block runs from its own addend to the next one **[V-data]**.
 
-Those blocks are **i16 triangle-strip index lists into section 0's stride-20 vertex array**: 496 of 530 blocks contain
-only values below 149,077 (the vertex count established in §2) with more than half non-zero, and 529 of 530 satisfy the
-strip property that every consecutive triple shares an index with its predecessor. Repeated indices inside a run mark the
-degenerate restarts between strips, e.g. `636, 636, 640, 649, 650, 649, 640, 640, 642` **[V-data]**. So §5's first open
-question - how triangles index the vertex records and where the oct-tree sits - is answered for level units; §8's
-expectation that strips sit in one particular payload is what was wrong: they are spread over many small sections and
-reached through leaf relocations.
+Those blocks were first read as **i16 triangle-strip index lists into section 0's stride-20 vertex array**: 496 of 530
+blocks contain only values below 149,077 (the vertex count established in §2) with more than half non-zero, and 529 of
+530 satisfy the strip property that every consecutive triple shares an index with its predecessor **[V-data]**. That
+reading has now been measured against geometry and it fails: drawing each block as a triangle list indexed into section
+0 gives an RMS longest edge of **20-64%** of the array's span for all nine trees, where genuine strips sit near 0.4%
+(§10). So what a leaf's +16 reference addresses is open again. What was already established stands: §8's expectation of
+one strip-bearing payload is wrong - the geometry-carrying sections are many small ones, reached through relocations
+**[V-data]**. `oa-asset <game-dir> terrain --hash 8BAF540E` prints both figures per tree.
 
-Still open: which material or texture page a leaf draws with. 622 of section 86's relocations point at section 87, whose
-payload begins `PCD9`/`DXT5` (§TEXTURES), so the oct-tree references at least one texture page directly; the per-leaf
-material fields sit in payload regions the walk does not visit. Rendering these strips with textures is the next step for
-Milestone 4.
+Every one of section 86's 1,155 relocations lands on a node field: **533 at the +16 slot of leaves** (the leaf
+references above) and **622 at child slots**. Both groups are kind 0 with `typeSpecific` 0. The leaf group points at real
+sibling sections; the child group is labelled target-section 87, whose payload opens with a `PCD9`/`DXT5` header - but the
+stored values cannot be offsets into that payload: the largest is `0x56F0` (22,256) against a section-87 payload of
+21,896 bytes, while every one of them lands inside section 86 and validates there as a self-relative child offset. So for
+these entries our decoder's "section index" field is not the pointer target; whether it names an owning object (a texture
+page id, matching `XboxPcMaterialStripList.tpageid` in spirit) or the entry encoding differs from `DRM.md` §2.1 for this
+kind of slot is unresolved **[V-data]**. Consequence for rendering: file-form children are self-relative and can be walked
+as measured, but neither the leaf-to-record link (§10) nor per-leaf material selection is known, so nothing indexed draws
+yet - a level unit's array renders as one unindexed run (§6).
 
 Note on `--section`: the directory prints section indices in **decimal** while `--section` parses **hexadecimal**, so
 section 86 is fetched with `--section 56`. The relocation list of a section only appears when that section is selected.
+
+## 10. What those payloads do hold: strip records, measured [V-data]
+
+Prior art `tr7/game/terrain.h:46` gives `TerrainTextureStripInfo` as a 44-byte header - vertexCount i32 at +0,
+vmoObjectIndex i32 at +4, texScrollOffset f32 at +8, lightFlags u32 at +12, stripFlags i32 at +16, matIdx i32 at +20,
+sortVertexMaterial 3xi16 at +24, sortVertexSpectral 3xi16 at +30, sortPush i32 at +36 and nextTexture u32 at +40 - and the
+file form matches it: that header, then `vertexCount` little-endian u16 indices into section 0's stride-20 array, with
+the indices starting at +44 **[V-data]**.
+
+Unit 8baf540e, measured by `oa-asset <game-dir> terrain --hash 8BAF540E`, which accepts a record start only when the
+header is sane, its index run stays inside that array and the triangles it draws are coherent against it (RMS longest
+edge under 1% of the array's span), and claims the bytes an accepted record spans so starts cannot overlap:
+
+    strip records: 101 payload(s) hold 4284 record(s), 2827 chain to another record start;
+                   they reference 15724/149077 vertices of section 0
+    leaf addends landing on a record start: 85 of 1620
+
+Two things follow. `nextTexture` in file form is an absolute byte offset **inside the same payload**: 2,827 of the 4,284
+records point at another accepted record start, and section 79 chains as 0x0 (vc=39, matIdx=7) -> 0x7C (vc=60, matIdx=8)
+-> 0x120 **[V-data]**. The oct-tree leaves, by contrast, do not point at records: only **85 of 1,620** leaf addends
+coincide with a record start, and in section 83 the block that addend 0 addresses opens
+`0x00905A4D, 3, 4, 0xFFFF, 0xB8, 0, 0x40`, which is no strip header **[V-data]**. Leaf-to-record linkage and those other
+payload kinds are unresolved; reading the executable's terrain loader is the way to settle them.
+
+Coverage is open as well: these records index only 15,724 of 149,077 vertices, roughly a tenth of the array. Whatever
+draws the rest is unidentified - `vmoObjectIndex` and prior art's portal-adjust vertex arrays are the candidates
+**[INFERENCE]**.
