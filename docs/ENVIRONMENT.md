@@ -63,11 +63,21 @@ cd ../openanniversary-work/wine-drive/trawork && DISPLAY=:0 wine ./tra.exe      
                                                                                   # "Tomb Raider: Anniversary" appears
 ```
 
-Measured: the process survives boot (RSS 214 MB at the menu, 265 MB after a menu choice), X reports its window title, and
-the install's own `d3d9.dll`/`dxwrapper.dll` shims stay in front of DXVK as shipped. RenderDoc 1.45 (Arch package) produced
-**no capture at all** this way - the Linux build does not inject into Wine guest processes, so capturing D3D traffic needs a
-Windows RenderDoc inside the prefix [V-data]. Runtime evidence therefore comes from reading `/proc/<pid>/maps` and
-`/proc/<pid>/mem` of the running process (read-only) rather than a GPU capture.
+Measured [V-data]: the game boots to its menu, and one `xdotool key Down` plus `Return` (window activated first) starts a
+new game - a desktop screenshot (`spectacle -b -n`, see below) shows Lara standing in Croft Manor's entrance hall, so real
+level assets are loaded and on screen. RSS: 214 MB at the menu, ~259-265 MB in-level. The install's own `d3d9.dll` and
+`dxwrapper.dll` shims stay in front of DXVK as shipped; the process survives indefinitely.
+
+Two runtime-evidence routes were tried and both need more work than they look:
+
+- **GPU capture:** RenderDoc 1.45 (Arch package) produced **no file at all** when launched as
+  `renderdoccmd capture -w … wine ./tra.exe` - the Linux build does not inject into Wine guest processes. Capturing D3D
+  traffic needs a Windows RenderDoc inside the prefix, or DXVK-side hooks.
+- **Address-space reading:** `/proc/<pid>/mem` returns `EACCES`. Kernel Yama is at `ptrace_scope = 1`, and Wine's PE
+  processes are children of `wineserver` (measured: `tra.exe` PID 1458690, PPID 1457), so no process we start - including one
+  that launched Wine itself - is an ancestor of the guest. Reading memory therefore goes through Wine's own debugger: run the
+  game under `winedbg`, stop it at a known address (`FUN_00455890` chapter start, or the unit loader `FUN_005bca80`, see
+  `docs/RESEARCH.md` §5.1) and use its `memsave` command to pull regions out for offline parsing by `oa_cdc`.
 
 ## Display and visual verification
 

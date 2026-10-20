@@ -246,6 +246,13 @@ zero version and has no releases yet.
   neither a Ghidra reference nor a single stored dword naming the terrain diagnostic at `0x655d79` (the console command at
   `0x650738` has one table entry, `0x664cc4`); and §12's instance-record layout matches no stride-20 section of unit `8baf540e`, so
   the loader's in-memory form is not the stored form. The two functions that do name the diagnostic are body/navigation code.
+- The shipped game now runs on this host for observation, and reaches real level content (`docs/ENVIRONMENT.md`): a Wine 11.20
+  prefix in the private work dir plus Heroic's DXVK 3.1 dlls boots `tra.exe`, and one activated-window `Down` + `Return` starts a
+  new game - screenshot shows Lara in Croft Manor's entrance hall (RSS 214 MB at menu, ~259 MB in-level). Two runtime-evidence
+  routes measured as blocked and are documented so they are not retried blind: RenderDoc 1.45 on Linux produced no capture of a
+  Wine guest process (empty output dir), and `/proc/<pid>/mem` returns `EACCES` because Yama is at `ptrace_scope = 1` while Wine
+  parents guests under `wineserver` (`tra.exe` PID 1458690, PPID 1457) - the route that does work is `winedbg` breakpoints at
+  measured addresses with its `memsave` command.
 
 ### Fixed
 

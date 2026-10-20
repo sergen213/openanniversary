@@ -25,9 +25,14 @@ acceptance evidence exists in this repository; otherwise it says what is missing
    (prior art's `XboxPcMaterialStripList.vbBaseOffset`; §16 measured 75 headers whose index runs name vertices outside the
    array, which such a base would also explain), why two trees' records are coarse throughout (medians 9,926 and 6,934 world
    units of edge length) while the other seven sit at 63-206, what the other payload kinds are, per-leaf material/texture-page
-   selection (section 86 also relocates against a `PCD9` section), and model-unit indexing for non-terrain meshes. Next step
-   is reading `tra.exe`'s terrain-group load path through the per-type handler table (`DAT_0088e2b0 + type*4`, §5/§7) instead
-   of inferring from data alone; `oa_cdc` walks tree and chains, and `oa-asset terrain` prints both measurements.
+   selection (section 86 also relocates against a `PCD9` section), and model-unit indexing for non-terrain meshes. Reading the
+   load path statically is capped by §17's base-relative references, so the next step is runtime: the shipped game boots into
+   Croft Manor under Wine plus DXVK (`docs/ENVIRONMENT.md`), and its memory comes out through `winedbg` - stop at
+   `FUN_00455890` (chapter start) or the unit loader `FUN_005bca80` and `memsave` regions, since Yama's `ptrace_scope = 1`
+   blocks direct `/proc/<pid>/mem` reads of Wine guests. Diff those bytes against the archive's to see whether index words are
+   rewritten as a unit loads and where a base value lives;
+   `oa_cdc`'s tree-and-chain walk plus `oa-asset terrain` remain the file-side reference, and the per-type handler table
+   (`DAT_0088e2b0 + type*4`, §5/§7) is the fallback if memory reading proves ambiguous.
    Licensing note stands: consulted prior art (cdcEngine tr7, GPL-3.0) is licence-compatible with this GPL-3.0-or-later tree;
    keep attribution if any code is taken.
 2. The five language-flavoured `specMask` groups (≈333 records each) are unconfirmed: identify by extracting one of

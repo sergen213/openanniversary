@@ -513,8 +513,18 @@ Three cheaper ways of reaching that code were tried and came up empty, so they a
 
 The two functions that do name that diagnostic are `FUN_0050aa40` and `FUN_0050b840`; reading the second shows body and
 navigation bookkeeping - a linked list of bodies, fixed 32-entry node arrays, per-body radius scaling - and no strip walk
-[V]. What §17 needs is interactive work in the disassembly: create functions at the handler slots, apply structures, follow
-xrefs from there. More grep will not produce it.
+[V]. Static hunting is capped there: cross-references in this image are base-relative, so `ExportXrefs.java` finds nothing
+for most targets and the call graph cannot be rebuilt by grep. What changed today is that the shipped game now boots into a
+real level on this machine under Wine plus DXVK (`docs/ENVIRONMENT.md`, "Running the original for observation"): the window
+shows Lara standing in Croft Manor's entrance hall, screenshot verified [V-data]. That makes the decisive measurement a
+memory question rather than a disassembly one - locate the loaded level payloads and any vertex buffer the engine built from
+them, and diff those bytes against the archive's. If index words were rewritten on load, the diff shows it; if not, a base
+value sits in some structure beside the oct-tree or its draw record. Direct `/proc/<pid>/mem` reads do not work: Yama is at
+`ptrace_scope = 1` and Wine parents guest processes under `wineserver`, so no process we start is an ancestor of the guest,
+and the read returns `EACCES` [V-data]. The working route is Wine's own debugger - run the game under `winedbg`, stop it at
+`FUN_00455890` (chapter start) or the unit loader `FUN_005bca80`, and `memsave` regions out for `oa_cdc` to parse. A GPU
+capture would answer the same question at the API level, but RenderDoc's Linux build injects nothing into Wine guests and
+produced no file [V-data].
 
 ## 18. An edge-length gate removes the gross chains and still certifies nothing, measured [V-data] [V-gpu]
 
