@@ -25,8 +25,10 @@ What it does, in order:
 3. Second configure with `-DOA_SANITIZE=ON` (ASan+UBSan) → build → **unit tests only**. Driver/SDL allocations are known
    to leak inside vendor code, so sanitizers guard the parser/core layer, not the display path.
 
-Verified on this host (CachyOS, GCC 16.2.1): plain suite 33/33; the renderer smoke passes against the real GPU through the
-Wayland session ("self-check passed", 3 frames presented, and with `OA_GAME_DIR` set the mesh probe reports its coverage);
+Verified on this host (CachyOS, GCC 16.2.1): plain suite 53/53; the renderer smoke passes against the real GPU through the
+Wayland session - both self-check phases pass ("matches the clear colour", "matches the uploaded texels"), and with
+`OA_GAME_DIR` set the same run draws shipped content: strip chains log 119,452 of 135,914 triangles with 16,462 gated by the
+edge rule over 4,776 records reached by 1,620 leaf references, and the point agent reports 773 of 900 ticks supported; then
 ASan+UBSan suite green. The same step under Xvfb without DRI3 exits 77 as a documented skip ("no presentation-capable
 Vulkan device") instead of failing, since that is an environment gap rather than a regression — measured here: Xvfb reports
 "No DRI3 support detected" and the renderer refuses with "no graphics+present queue with a swapchain-capable device".
@@ -36,7 +38,7 @@ Runner-side behaviour (Ubuntu image plus `mesa-vulkan-drivers`/lavapipe) is *not
 
 ```sh
 cmake -S . -B build -G Ninja -DOA_BUILD_TESTS=ON && cmake --build build
-ctest --test-dir build --output-on-failure          # 12 tests, ~10 ms total
+ctest --test-dir build --output-on-failure          # 53 tests, well under a second total
 ```
 
 Fixture policy — the suite must pass with **no game data present**, so it is runnable in CI and on any machine:
@@ -49,6 +51,7 @@ Fixture policy — the suite must pass with **no game data present**, so it is r
 | Compression | stored, zlib and raw-deflate records generated in-test with zlib | §5 |
 | Specialisation masks | mask selection incl. `0xFFFFFFFF` always-on case | §4 |
 | Config / logging | defaults < file < `--key=value` precedence; level filtering writes one subsystem line | behaviour of `src/core/{Config,Log}.cpp` |
+| Mesh camera keys | synthetic `MeshKeys` states fed to `render::applyMeshKeys()` | orbit direction and cancellation, the pitch clamp after hundreds of frames, Q/E as an exact inverse pair, pan direction at yaw 0 and yaw pi/2, target mirrored into the camera - the mapping behind the on-screen camera, testable without a window |
 
 Rules followed when writing these: assert observable behaviour (returned bytes, chosen part, emitted log text), never
 that a helper was called; no test reads `/mnt/...`; nothing sleeps or waits on wall-clock time.

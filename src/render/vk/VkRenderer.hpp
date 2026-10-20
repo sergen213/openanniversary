@@ -10,6 +10,7 @@
 #include <vulkan/vulkan.h>
 
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -53,12 +54,51 @@ struct MeshUpload {
     float boundsMax[3] = {0.0f, 0.0f, 0.0f};
 };
 
-// Orbit camera for the mesh: yaw and pitch in radians around the bounds centre, zoom scales the fit.
+// Camera for the mesh pass: yaw and pitch in radians around a target, `zoom` scales the fit, `panX/panY/panZ` move that
+// target through world units (the archive's own axis convention, see pushMeshMatrix), and `fovDegrees` switches between
+// the orthographic fit used by the deterministic probes (0) and a perspective frustum for looking around a level.
 struct MeshCamera {
     float yaw = 0.7f;
     float pitch = 0.4f;
     float zoom = 1.0f;
+    float panX = 0.0f;
+    float panY = 0.0f;
+    float panZ = 0.0f;
+    float fovDegrees = 0.0f;   // 0 keeps the orthographic fit
 };
+
+// The keys the mesh pass listens for, resolved to booleans by the app so this mapping needs no window.
+struct MeshKeys {
+    bool left = false, right = false, up = false, down = false;
+    bool forward = false, back = false, strafeLeft = false, strafeRight = false;
+    bool dollyIn = false, dollyOut = false;
+};
+
+// One frame of camera motion: arrows orbit (pitch clamped short of the poles), Q/E dolly the fit, WASD slide the
+// look-at target along the view's own basis vectors. panTarget accumulates in world units and is mirrored into
+// camera.pan*, so a caller that rebuilds MeshCamera every frame keeps its place. camStep is fitted to the mesh extent.
+inline void applyMeshKeys(MeshCamera& camera, float panTarget[3], const MeshKeys& keys, float camStep) {
+    const float cy = std::cos(camera.yaw), sy = std::sin(camera.yaw);
+    const float cp = std::cos(camera.pitch), sp = std::sin(camera.pitch);
+    const float right[3] = {cy, 0.0f, sy};
+    const float away[3] = {-cp * sy, sp, cp * cy};
+    if (keys.left) camera.yaw -= 0.02f;
+    if (keys.right) camera.yaw += 0.02f;
+    if (keys.up) camera.pitch = std::min(camera.pitch + 0.02f, 1.5f);
+    if (keys.down) camera.pitch = std::max(camera.pitch - 0.02f, -1.5f);
+    const float pan[3][2] = {{right[0], away[0]}, {right[1], away[1]}, {right[2], away[2]}};
+    for (int axis = 0; axis < 3; ++axis) {
+        if (keys.forward) panTarget[axis] += camStep * pan[axis][1];
+        if (keys.back) panTarget[axis] -= camStep * pan[axis][1];
+        if (keys.strafeRight) panTarget[axis] += camStep * pan[axis][0];
+        if (keys.strafeLeft) panTarget[axis] -= camStep * pan[axis][0];
+    }
+    if (keys.dollyIn) camera.zoom *= 1.03f;
+    if (keys.dollyOut) camera.zoom /= 1.03f;
+    camera.panX = panTarget[0];
+    camera.panY = panTarget[1];
+    camera.panZ = panTarget[2];
+}
 
 class VkRenderer {
 public:

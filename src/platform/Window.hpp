@@ -15,6 +15,12 @@ struct WindowConfig {
     bool resizable = true;
 };
 
+enum class Key {
+    Left, Right, Up, Down,   // arrow keys
+    W, A, S, D,              // pan in the view plane
+    Q, E,                    // zoom out / in
+};
+
 class Window {
 public:
     // One-time SDL initialisation for the video subsystem. Returns false with a message when no display is
@@ -34,7 +40,8 @@ public:
     // Pump once. Sets closed_ on a quit request or window close; Escape also closes so a stuck window is escapable.
     void pumpEvents();
     bool shouldClose() const { return closed_; }
-    bool keyDown(int sdlScancode) const;
+    // Named keys so the app never learns SDL's scancode numbers. Anything not listed here stays unpolled.
+    bool keyDown(Key key) const;
 
 private:
     SDL_Window* window_ = nullptr;

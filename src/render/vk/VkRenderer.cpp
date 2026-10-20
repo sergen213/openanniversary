@@ -1841,22 +1841,57 @@ void VkRenderer::pushMeshMatrix(VkCommandBuffer command) const {
     const float sy = std::sin(camera_.yaw);
     const float cp = std::cos(camera_.pitch);
     const float sp = std::sin(camera_.pitch);
-    // A = Rx(pitch) * Ry(yaw), rows of the world-to-view rotation.
+    // A = Rx(pitch) * Ry(yaw), rows of the world-to-view rotation. v = A * (p - target) puts the camera's look-at
+    // point at the origin; +v.z runs away from the viewer, which is the direction the orthographic path below has
+    // always mapped to greater depth.
     const float a[3][3] = {{cy, 0.0f, sy}, {sp * sy, cp, -sp * cy}, {-cp * sy, sp, cp * cy}};
-    // Uniform scale keeps proportions; y flips because clip space has its origin at the top left in Vulkan, and z is
-    // halved into the [0,1] depth range the attachment uses.
-    const float s = camera_.zoom / meshRadius_;
-    const float rowScale[3] = {s, -s, 0.5f * s};
+    const float target[3] = {meshCentre_[0] + camera_.panX, meshCentre_[1] + camera_.panY, meshCentre_[2] + camera_.panZ};
+    float m[4][3];   // rows of the linear part, applied to p - target; k[] holds the constant term of each row
+    float k[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    if (camera_.fovDegrees > 0.0f) {
+        // Perspective: the camera sits `distance` behind the target along -v.z, and the sphere that fits the mesh is
+        // framed at zoom 1. A point's distance from the camera is u = v.z + distance, so w = u and depth is linear in u:
+        // z_clip/w = aDepth + bDepth/u with aDepth + bDepth/nearPlane = 0 and aDepth + bDepth/farPlane = 1. The planes sit
+        // outside the mesh at any zoom, so panning into geometry does not clip the subject away.
+        const float fov = camera_.fovDegrees * 3.14159265358979323846f / 180.0f;
+        const float distance = meshRadius_ * camera_.zoom / std::tan(0.5f * fov);
+        const float nearPlane = std::max(1.0f, distance - 1.5f * meshRadius_);
+        const float farPlane = distance + 1.5f * meshRadius_;
+        const float scaleXY = distance / meshRadius_;   // the fitting sphere spans the frame at zoom 1
+        const float aDepth = farPlane / (farPlane - nearPlane);
+        const float bDepth = -nearPlane * farPlane / (farPlane - nearPlane);
+        for (int column = 0; column < 3; ++column) {
+            m[0][column] = scaleXY * a[0][column];
+            m[1][column] = -scaleXY * a[1][column];
+            m[2][column] = aDepth * a[2][column];
+            m[3][column] = a[2][column];
+        }
+        k[2] = aDepth * distance + bDepth;
+        k[3] = distance;
+    } else {
+        // Uniform scale keeps proportions; y flips because clip space has its origin at the top left in Vulkan, and z is
+        // halved into the [0,1] depth range the attachment uses.
+        const float s = camera_.zoom / meshRadius_;
+        const float rowScale[3] = {s, -s, 0.5f * s};
+        for (int column = 0; column < 3; ++column) {
+            for (int row = 0; row < 3; ++row) m[row][column] = rowScale[row] * a[row][column];
+            m[3][column] = 0.0f;
+        }
+        k[2] = 0.5f;   // centre the orthographic depth range on the target
+        k[3] = 1.0f;
+    }
     float matrix[16]{};
     for (int column = 0; column < 3; ++column) {
-        for (int row = 0; row < 3; ++row) matrix[column * 4 + row] = rowScale[row] * a[row][column];
+        for (int row = 0; row < 4; ++row) matrix[column * 4 + row] = m[row][column];
     }
-    for (int row = 0; row < 3; ++row) {
-        float sum = 0.0f;
-        for (int column = 0; column < 3; ++column) sum -= matrix[column * 4 + row] * meshCentre_[column];
-        matrix[12 + row] = sum + (row == 2 ? 0.5f : 0.0f);
+    // Translation: -M*target plus the row's constant.
+    for (int row = 0; row < 4; ++row) {
+        float sum = k[row];
+        for (int column = 0; column < 3; ++column) sum -= m[row][column] * target[column];
+        matrix[12 + row] = sum;
     }
-    matrix[15] = 1.0f;
+    // matrix[15] is the constant of the w row, which the loop above already wrote (the orthographic path's k[3] is 1.0
+    // and its m[3] is zero, so it stays 1 there; perspective needs `distance`, not a hardcoded 1).
     vkCmdPushConstants(command, meshLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(matrix), matrix);
 }
 

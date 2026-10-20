@@ -66,10 +66,15 @@ void Window::pumpEvents() {
     }
 }
 
-bool Window::keyDown(int sdlScancode) const {
+bool Window::keyDown(Key key) const {
+    static constexpr int kScancode[] = {SDL_SCANCODE_LEFT, SDL_SCANCODE_RIGHT, SDL_SCANCODE_UP, SDL_SCANCODE_DOWN,
+                                        SDL_SCANCODE_W, SDL_SCANCODE_A, SDL_SCANCODE_S, SDL_SCANCODE_D,
+                                        SDL_SCANCODE_Q, SDL_SCANCODE_E};
+    const int index = static_cast<int>(key);
     int count = 0;
     const bool* states = SDL_GetKeyboardState(&count);
-    return states != nullptr && sdlScancode >= 0 && sdlScancode < count && states[sdlScancode];
+    return states != nullptr && index >= 0 && index < static_cast<int>(std::size(kScancode)) && kScancode[index] < count &&
+           states[kScancode[index]];
 }
 
 }  // namespace oa::platform

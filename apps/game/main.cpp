@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <chrono>
 #include <map>
+#include <cmath>
 
 #include <cstdio>
 #include <set>
@@ -215,6 +216,12 @@ int main(int argc, char** argv) {
     // graph, no materials (docs/formats/GEOMETRY.md §6). --section is hexadecimal like --texture's; without it the
     // largest stored type-0 section is used, which is a convenience for level units only — §1 shows why it is not a
     // general rule. --yaw/--pitch/--zoom orbit and fit the camera so one run frames identically every time.
+    // The mesh camera lives outside the --mesh block so the frame loop can move it with keys; panTarget is its look-at
+    // offset in world units and camStep is fitted to whatever mesh gets drawn.
+    oa::render::MeshCamera camera;
+    float panTarget[3] = {0.0f, 0.0f, 0.0f};
+    float camStep = 1.0f;
+
     const std::string meshPath = config.str("mesh");
     if (!meshPath.empty()) {
         oa::cdc::BigfileSet archive;
@@ -289,6 +296,9 @@ int main(int argc, char** argv) {
         // references of this unit land on a record header (docs/formats/GEOMETRY.md §15). Culling is not applied yet, so
         // whole chains are drawn rather than the cells a camera would see.
         std::vector<std::uint32_t> stripIndices;
+        std::vector<std::uint32_t> drawIndices;   // the gated copy handed to the GPU
+        std::uint32_t coarseTriangles = 0;
+        constexpr double kMaxEdgeSquared = 1000.0 * 1000.0;   // world units squared, see the gate below
         if (config.flag("strips", false)) {
             std::uint32_t trees = 0;
             std::uint32_t records = 0;
@@ -328,12 +338,31 @@ int main(int argc, char** argv) {
                     heads += walked.heads;
                     badHeads += walked.badHeads;
                     brokenLinks += walked.brokenLinks;
-                    stripIndices.insert(stripIndices.end(), walked.indices.begin(), walked.indices.end());
+                    // Gate what goes to the screen, not what --walk reads. GEOMETRY.md §16-§17 measure that edge length is
+                    // bimodal per record under base 0: most chains sit at 63-206 world units while whole records land at
+                    // ~7k-10k because their indices name a region of section 0 no base has been established for (§18). The
+                    // same rule GEOMETRY.md §17 uses to score a vertex base - non-degenerate, longest edge under 1,000 units -
+                    // is what goes to the screen here; triangles outside it are counted and left undrawn, not guessed at.
+                    for (std::size_t t = 0; t + 2 < walked.indices.size(); t += 3u) {
+                        const auto& a = vertices[walked.indices[t]];
+                        const auto& b = vertices[walked.indices[t + 1u]];
+                        const auto& c = vertices[walked.indices[t + 2u]];
+                        const double e[3] = {(double)(a.x - b.x) * (a.x - b.x) + (double)(a.y - b.y) * (a.y - b.y) + (double)(a.z - b.z) * (a.z - b.z),
+                                             (double)(b.x - c.x) * (b.x - c.x) + (double)(b.y - c.y) * (b.y - c.y) + (double)(b.z - c.z) * (b.z - c.z),
+                                             (double)(c.x - a.x) * (c.x - a.x) + (double)(c.y - a.y) * (c.y - a.y) + (double)(c.z - a.z) * (c.z - a.z)};
+                        const double low = std::min({e[0], e[1], e[2]});
+                        const double high = std::max({e[0], e[1], e[2]});
+                        stripIndices.insert(stripIndices.end(), {walked.indices[t], walked.indices[t + 1u], walked.indices[t + 2u]});
+                        if (!(low > 1.0 && high < kMaxEdgeSquared)) { ++coarseTriangles; continue; }
+                        drawIndices.insert(drawIndices.end(), {walked.indices[t], walked.indices[t + 1u], walked.indices[t + 2u]});
+                    }
                 }
             }
             OA_LOG(oa::LogLevel::Info, "app", "{} terrain tree(s): {} leaf reference(s) reached {} record(s), drawing "
-                                              "{} triangle(s) over {} vertex/vertices; {} bad head(s), {} broken link(s)",
-                   trees, heads, records, stripIndices.size() / 3u, vertices.size(), badHeads, brokenLinks);
+                                              "{} of {} triangle(s) over {} vertex/vertices ({} gated by the edge rule, "
+                                              "{} bad head(s), {} broken link(s))",
+                   trees, heads, records, drawIndices.size() / 3u, stripIndices.size() / 3u,
+                   vertices.size(), coarseTriangles, badHeads, brokenLinks);
         }
 
         // --walk=true sends a point agent over the decoded strip geometry before any frame is drawn: gravity pulls it down,
@@ -423,26 +452,61 @@ int main(int argc, char** argv) {
         // The buffer is the payload itself: the vertex layout is identical, so there is nothing to repack.
         mesh.bytes = payload.data();
         mesh.vertexCount = static_cast<std::uint32_t>(vertices.size());
+        // Frame the camera on what is actually drawn. With strips gated, most of the shipped vertex array carries no
+        // triangle at all, and fitting to the whole array leaves the drawn patch a few pixels wide.
+        float frameMin[3], frameMax[3];
         for (int axis = 0; axis < 3; ++axis) {
-            mesh.boundsMin[axis] = bounds.min[axis];
-            mesh.boundsMax[axis] = bounds.max[axis];
+            frameMin[axis] = bounds.min[axis];
+            frameMax[axis] = bounds.max[axis];
         }
-        mesh.indices = stripIndices.empty() ? nullptr : &stripIndices;
+        if (!drawIndices.empty()) {
+            // Fit the camera to where the drawn vertices actually cluster, not to their extremes: a handful of records
+            // reach across tens of thousands of units (the coarse ones §16-§17 measured), and fitting to those leaves the
+            // bulk of the geometry a few pixels wide. p2-p98 per axis is our own framing choice, stated here so the
+            // picture can be compared run to run.
+            std::vector<float> coordinate[3];
+            for (const auto& index : drawIndices) {
+                const auto& vertex = vertices[index];
+                coordinate[0].push_back(static_cast<float>(vertex.x));
+                coordinate[1].push_back(static_cast<float>(vertex.y));
+                coordinate[2].push_back(static_cast<float>(vertex.z));
+            }
+            for (int axis = 0; axis < 3; ++axis) {
+                std::sort(coordinate[axis].begin(), coordinate[axis].end());
+                const auto pick = [&](float fraction) {
+                    return coordinate[axis][static_cast<std::size_t>(fraction * static_cast<float>(coordinate[axis].size() - 1u))];
+                };
+                frameMin[axis] = pick(0.02f);
+                frameMax[axis] = pick(0.98f);
+            }
+        }
+        for (int axis = 0; axis < 3; ++axis) {
+            mesh.boundsMin[axis] = frameMin[axis];
+            mesh.boundsMax[axis] = frameMax[axis];
+        }
+        // The gated copy is what goes to the GPU; the ungated list stays available for --walk (see above).
+        mesh.indices = drawIndices.empty() ? nullptr : &drawIndices;
         if (!renderer.uploadMesh(mesh, &error)) {
             OA_LOG(oa::LogLevel::Error, "app", "cannot upload the triangle run: {}", error);
             return 2;
         }
-        oa::render::MeshCamera camera;
         if (const std::string yaw = config.str("yaw"); !yaw.empty()) camera.yaw = std::strtof(yaw.c_str(), nullptr);
         if (const std::string pitch = config.str("pitch"); !pitch.empty()) {
             camera.pitch = std::strtof(pitch.c_str(), nullptr);
         }
         if (const std::string zoom = config.str("zoom"); !zoom.empty()) camera.zoom = std::strtof(zoom.c_str(), nullptr);
+        // --fov=<degrees> switches the mesh pass to a perspective frustum; 0 keeps the orthographic fit that the
+        // offscreen probe and the dumps depend on.
+        if (const std::string fov = config.str("fov"); !fov.empty()) camera.fovDegrees = std::strtof(fov.c_str(), nullptr);
+        camStep = 0.02f * std::max({frameMax[0] - frameMin[0], frameMax[1] - frameMin[1], frameMax[2] - frameMin[2]});
         renderer.setMeshCamera(camera);
+        OA_LOG(oa::LogLevel::Info, "app", "camera keys: arrows orbit, WASD slide the look-at target, Q/E dolly; "
+                                         "{} projection at yaw {:.2f} pitch {:.2f} zoom {:.2f}",
+               camera.fovDegrees > 0.0f ? "perspective" : "orthographic", camera.yaw, camera.pitch, camera.zoom);
         OA_LOG(oa::LogLevel::Info, "app", "drawing section {} of '{}' (id {}, type {}): {} vertices, {} triangles, "
                                          "bounds {:.0f}x{:.0f}x{:.0f} world units",
                chosen, meshPath, geometry.id, static_cast<int>(geometry.type), vertices.size(), bounds.triangles,
-               bounds.max[0] - bounds.min[0], bounds.max[1] - bounds.min[1], bounds.max[2] - bounds.min[2]);
+               frameMax[0] - frameMin[0], frameMax[1] - frameMin[1], frameMax[2] - frameMin[2]);
 
         // With --self-check the same mesh is drawn offscreen and every lit pixel must be one of the shipped vertex
         // colours: that one pass proves upload, index format, matrix convention and the colour path (docs/TESTING.md).
@@ -539,6 +603,23 @@ int main(int argc, char** argv) {
     const auto started = std::chrono::steady_clock::now();
     while (!window.shouldClose()) {
         window.pumpEvents();
+        if (renderer.hasMesh()) {
+            // Keys move the mesh camera every frame. The mapping itself lives in render::applyMeshKeys so it is
+            // covered without a window (tests/test_meshcamera.cpp); arrows orbit, WASD slide the target, Q/E dolly.
+            oa::render::MeshKeys keys;
+            keys.left = window.keyDown(oa::platform::Key::Left);
+            keys.right = window.keyDown(oa::platform::Key::Right);
+            keys.up = window.keyDown(oa::platform::Key::Up);
+            keys.down = window.keyDown(oa::platform::Key::Down);
+            keys.forward = window.keyDown(oa::platform::Key::W);
+            keys.back = window.keyDown(oa::platform::Key::S);
+            keys.strafeRight = window.keyDown(oa::platform::Key::D);
+            keys.strafeLeft = window.keyDown(oa::platform::Key::A);
+            keys.dollyIn = window.keyDown(oa::platform::Key::E);
+            keys.dollyOut = window.keyDown(oa::platform::Key::Q);
+            oa::render::applyMeshKeys(camera, panTarget, keys, camStep);
+            renderer.setMeshCamera(camera);
+        }
         const int width = window.widthPixels();
         const int height = window.heightPixels();
         if (width != lastWidth || height != lastHeight) {
