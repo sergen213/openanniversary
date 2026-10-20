@@ -1,0 +1,17 @@
+# Build output
+build*/
+.cache/
+compile_commands.json
+
+# Private reverse-engineering artifacts: derived from a proprietary executable.
+# Never commit decompilations, Ghidra projects, string dumps or extracted game data.
+*-work/
+*.log
+
+# Game data and proprietary binaries must never enter this repository.
+bigfile.*
+*.drm
+*.bik
+*.mul
+*.exe
+*.dll
