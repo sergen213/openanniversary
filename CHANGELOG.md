@@ -13,7 +13,14 @@ zero version and has no releases yet.
   hashing (poly `0x04C11DB7`, init/final `0xFFFFFFFF`, non-reflected), sector/part addressing with the
   Legend/Anniversary alignment `0x9600000`, specialisation-mask record selection, zlib and raw-deflate inflation for
   compressed records, and reads that straddle a part boundary.
-- `oa-asset` subcommands `list`, `hash`, `resolve <paths.txt>` and `extract --path|--hash [--mask]`.
+- `oa-asset` subcommands `list`, `hash`, `resolve <paths.txt>`, `extract --path|--hash [--mask]` and
+  `drm --path|--hash [--section N --out FILE]`.
+- DRM v14 unit parser (`src/cdc/Drm.*`): section directory, per-section payload offsets and 8-byte relocation pairs,
+  refusing instead of guessing when the walk does not close at end-of-image, when block A does not fit, or when a
+  texture section misses its `PCD9` magic. Resolved on the way: the trailing size-0 type-32 table entry is **not** a
+  relocation count - reading it as one over-consumes `generalbank.drm` by 56 bytes and `uigeneral.drm` by 32, which
+  is also what made both files look like they "drifted" earlier (`docs/formats/DRM.md` §2.1). Five new unit tests on
+  synthetic units; real-unit verification recorded in `docs/TESTING.md` §3.
 - Startup plumbing: one-line UTC log records filtered by level (`src/core/Log.*`) and three-layer key/value
   configuration, defaults < file < `--key=value` command line (`src/core/Config.*`).
 - Native front end (Milestone 2): SDL3 window with close/Escape handling and keyboard state (`src/platform/Window.*`),

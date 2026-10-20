@@ -5,10 +5,12 @@
 //   oa-asset <game-dir> resolve <paths.txt>               pair candidate paths with the record table
 //   oa-asset <game-dir> extract --hash HEX [--mask HEX] --out FILE
 //   oa-asset <game-dir> extract --path "pc-w\lara.drm" --out FILE
+//   oa-asset <game-dir> drm --path PATH | --hash HEX [--section N --out FILE]
 //
 // Records are stored unlabelled; names come from outside (see docs/formats/CONTAINERS.md).
 
 #include "cdc/Bigfile.hpp"
+#include "cdc/Drm.hpp"
 
 #include <cstdio>
 #include <fstream>
@@ -28,6 +30,8 @@ struct Options {
     bool haveHash = false;
     std::uint32_t hash = 0;
     std::uint32_t mask = oa::cdc::kMaskAll;
+    bool haveSection = false;
+    std::uint32_t section = 0;
     std::vector<std::string> positional;
 };
 
@@ -62,6 +66,10 @@ bool parseArgs(int argc, char** argv, Options& opt, std::string& error) {
             opt.out = text;
         } else if (arg == "--path") {
             if (!value(opt.path)) return false;
+        } else if (arg == "--section") {
+            std::string text;
+            if (!value(text) || !parseHex(text, opt.section)) return false;
+            opt.haveSection = true;
         } else if (arg == "--paths") {
             if (!value(opt.pathsFile)) return false;
         } else if (arg == "--mask" || arg == "--hash") {
@@ -84,6 +92,19 @@ bool parseArgs(int argc, char** argv, Options& opt, std::string& error) {
 int fail(const std::string& message) {
     std::cerr << "oa-asset: " << message << '\n';
     return 1;
+}
+
+// Resolves --hash or --path to a record index under the current spec mask.
+std::optional<std::size_t> findRecord(const oa::cdc::BigfileSet& archive, const Options& opt) {
+    if (opt.haveHash) {
+        for (std::size_t i = 0; i < archive.records().size(); ++i) {
+            const auto& record = archive.records()[i];
+            if (record.hash == opt.hash && (record.specMask & opt.mask) == opt.mask) return i;
+        }
+        return std::nullopt;
+    }
+    if (!opt.path.empty()) return archive.find(opt.path, opt.mask);
+    return std::nullopt;
 }
 
 void printRecord(const oa::cdc::Record& record, const char* name = nullptr) {
@@ -139,21 +160,11 @@ int main(int argc, char** argv) {
     }
 
     if (opt.command == "extract") {
-        std::optional<std::size_t> index;
-        if (opt.haveHash) {
-            for (std::size_t i = 0; i < archive.records().size(); ++i) {
-                const auto& record = archive.records()[i];
-                if (record.hash == opt.hash && (record.specMask & opt.mask) == opt.mask) {
-                    index = i;
-                    break;
-                }
-            }
-        } else if (!opt.path.empty()) {
-            index = archive.find(opt.path, opt.mask);
-        } else {
-            return fail("extract needs --hash or --path");
+        const auto index = findRecord(archive, opt);
+        if (!index) {
+            return fail("extract needs --hash or --path that matches a record at mask " +
+                        std::to_string(opt.mask));
         }
-        if (!index) return fail("no record for the requested hash/path at mask " + std::to_string(opt.mask));
 
         const auto data = archive.read(*index, &error);
         if (data.empty() && !error.empty()) return fail(error);
@@ -167,6 +178,51 @@ int main(int argc, char** argv) {
         std::fclose(out);
         if (written != data.size()) return fail("short write to " + opt.out);
         std::fprintf(stderr, "wrote %zu bytes to %s\n", data.size(), opt.out.c_str());
+        return 0;
+    }
+
+    if (opt.command == "drm") {
+        const auto index = findRecord(archive, opt);
+        if (!index) return fail("drm needs --hash or --path that matches a record");
+        const auto data = archive.read(*index, &error);
+        if (data.empty() && !error.empty()) return fail(error);
+
+        oa::cdc::DrmFile drm;
+        std::string drmError;
+        if (!oa::cdc::DrmFile::parse(data, &drm, &drmError)) return fail("DRM: " + drmError);
+
+        const auto& hdr = drm.header();
+        std::printf("version=%u sections=%u blockABytes=%u valueD=%u sentinel=%08X image=%zu\n", hdr.version,
+                    hdr.numSections, hdr.blockABytes, hdr.valueD, hdr.sentinel, data.size());
+        std::printf("payloadBase=%llu (extra region after block A = %lld)\n",
+                    static_cast<unsigned long long>(drm.payloadBase()),
+                    static_cast<long long>(drm.payloadBase() - 28ull - 20ull * hdr.numSections -
+                                            hdr.blockABytes));
+        std::printf("%-5s %-4s %-9s %-10s %-7s %-6s %s\n", "idx", "type", "size", "id", "relocs", "flags",
+                    "payloadOffset");
+        for (std::size_t i = 0; i < drm.sections().size(); ++i) {
+            const auto& s = drm.sections()[i];
+            std::printf("%-5zu %-4u %-9u %-10u %-7u %-6u %zu\n", i, s.type, s.size, s.id, s.relocCount,
+                        s.flags, s.payloadOffset);
+        }
+        std::fprintf(stderr, "%zu sections, %zu anchor-verified texture payloads\n", drm.sections().size(),
+                     drm.anchoredSections());
+
+        if (opt.haveSection) {
+            if (opt.section >= drm.sections().size()) return fail("section index out of range");
+            const auto payload = drm.payload(drm.sections()[opt.section]);
+            if (opt.out.empty()) {
+                std::fwrite(payload.data(), 1, payload.size(), stdout);
+                return 0;
+            }
+            std::FILE* out = std::fopen(opt.out.c_str(), "wb");
+            if (out == nullptr) return fail("cannot write " + opt.out);
+            const std::size_t written = std::fwrite(payload.data(), 1, payload.size(), out);
+            std::fclose(out);
+            if (written != payload.size()) return fail("short write to " + opt.out);
+            std::fprintf(stderr, "wrote %zu bytes of section %u to %s\n", payload.size(), opt.section,
+                         opt.out.c_str());
+        }
         return 0;
     }
 

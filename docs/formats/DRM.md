@@ -13,8 +13,8 @@ Evidence corpus (extracted with `oa-asset extract`, read-only):
 | `pc-w\lara.drm` | 7,630,042 | 1712 | parses exactly: all 71 texture sections land on their magic, total consumption == file size [V-data] |
 | `pc-w\handgun_rbweapon.drm` | 393,702 | 175 | parses exactly (16/16 texture anchors + EOF) [V-data] |
 | `pc-w\particle.drm` | 40,766 | 20 | parses exactly (11/11 texture anchors + EOF) [V-data] |
-| `pc-w\uigeneral.drm` | 617,651 | 155 | section directory valid; payload walk drifts by +32 bytes once and −12 in total — open question (§4) |
-| `pc-w\generalbank.drm` | 90,384 | 247 | payload walk over-counts by 20 bytes — open question (§4) |
+| `pc-w\uigeneral.drm` | 617,651 | 155 | parses exactly once the tail entry is treated per §2.1: 25/25 texture anchors + EOF [V-data] |
+| `pc-w\generalbank.drm` | 90,384 | 247 | parses exactly once the tail entry is treated per §2.1: 1/1 texture anchor + EOF [V-data] |
 | `pc-w\globalsoundinfo.drm` | 6,998 | 10 | no anchored section type; directory only |
 
 ## 1. Header [V-data]
@@ -56,6 +56,14 @@ the packed upper field as a count and multiplying by 8 makes `lara.drm` land all
 magic and consume the file exactly. (`openunderworld` records v19 storing the same field in *bytes*, TR7 in `count×8`
 [S]; our measurement agrees with the TR7 reading.)
 
+**The trailing type-32 entry is not a relocation count.** Every unit examined ends its section table
+with one entry of type `32` and payload size `0`. Reading its bits 8-31 as a count makes the walk
+over-consume by 56 bytes in `generalbank.drm`, 32 in `uigeneral.drm`, 16/8/8 in three sampled records,
+and then no texture magic lands where the directory says. Treating that entry as carrying **no**
+relocation table closes all of them byte-exactly with every `PCD9` anchor in place (38 of 41 sampled
+v14 units; the other three have no type-5 section to anchor on) [V-data]. Implemented in
+`src/cdc/Drm.cpp` (`relocBytes`) and pinned by `tests/test_drm.cpp:parsesTextureGeneralAndTailSentinel`.
+
 ### 2.2 Payload magic [V-data]
 
 Type-5 (texture) payloads begin with ASCII `PCD9` followed by a DXT1 encoding tag, e.g. `lara.drm` at `0x92b8`:
@@ -79,27 +87,35 @@ Following it there is a further region whose size must be added before payloads 
 | `particle.drm` | 140 | 20 (all zero bytes) |
 | `handgun_rbweapon.drm` | 288 | 60 |
 
-No header field equals the extra size, and it does not track section count, relocation-entry count or unique ids in any
-tested combination [V-data]. In `particle.drm` it is literally zero-filled padding, which suggests alignment or an
-optional table that these units leave empty. Resolving its rule is prerequisite to a general parser; for the three files
-measured, adding it makes the walk exact.
+No header field equals the extra size, so the parser does not try to predict it: it computes the total
+of `payload + relocation` bytes over the directory and places the first payload at
+`imageSize − total`, which is only valid when that lands past the table end plus `blockABytes` **and**
+every texture section then starts with its magic — both are checked, and a unit that fails either is
+refused rather than guessed [V-data]. Measured extra sizes: 924 (`lara`), 60 (`handgun_rbweapon`),
+36 (`generalbank`), 20 (`particle`, `uigeneral`, `globalsoundinfo`, and one sampled record), 92 (two
+sampling records that are spec-mask variants of each other). The remaining unknown is *why* the region
+has that size; it no longer blocks parsing.
 
 ## 4. Open questions (must stay visible)
 
-1. **Extra-region rule** (§3). Needed before arbitrary units can be parsed by formula.
-2. **Two files disagree with the uniform 8-byte relocation unit**: `generalbank.drm` over-consumes by 20 bytes,
-   `uigeneral.drm` shows a constant +32 payload offset from its first texture section onward plus a −12 total
-   discrepancy [V-data]. Either some section types use a different relocation entry size, or those units carry an extra
-   per-section block (debug info? name table?) that the six-file corpus only exercises in these two cases.
+1. **Why the extra region (§3) has the size it does.** Parsing works by deriving it from byte-exact
+   closure plus magic validation, but no field or rule that predicts it has been found [V-data].
+2. ~~Two files disagree with the uniform 8-byte relocation unit~~ — **resolved**: the trailing size-0
+   type-32 entry contributes no relocation bytes (§2.1). `generalbank.drm` and `uigeneral.drm` now walk
+   exactly, and three sampled records that previously drifted by 8/8/16 bytes also close [V-data].
 3. `valueD` (`hdr[4]`) role: values 1280/1792/2560/30208 correlate loosely with file size; unproven.
-4. Semantics of section types `32` (present in all six files, exactly one such section each) and `2`, `6`, `7`; the v19
-   type table [S] lists 2 = ANIMATION, 5 = TEXTURE, 6 = WAVE, but Anniversary's numbering is only confirmed for 5 here.
+4. Semantics of section types `32` (present in all six files, exactly one such section each) and `2`,
+   `6`, `7`; the v19 type table [S] lists 2 = ANIMATION, 5 = TEXTURE, 6 = WAVE, but Anniversary's
+   numbering is only confirmed for 5 here.
+5. Relocation entry semantics: pairs of u32 were read directly out of `lara.drm` (offset/value), e.g.
+   section 4 at its payload start: `28000000 0c000000 …`; what the value half refers to is unproven.
 
 ## 5. Consequences for the implementation
 
-* The section *directory* — types, sizes, ids, relocation counts — is trustworthy: it validated against magic anchors in
-  three files including the largest. `src/formats/Drm.*` can therefore expose sections to the renderer while the
-  extra-region rule (§4.1) is still open, by taking the payload base as a solved value and **refusing** (not guessing)
-  when the arithmetic does not close.
-* Geometry comes from type-7/type-2 sections of `lara.drm`; textures from type 5 (`PCD9`/DXT1). Both are reachable with
-  the directory above, so Milestone 4 is unblocked by this page even with §4 open.
+* `src/cdc/Drm.{hpp,cpp}` parses a unit image, exposes sections with their payload offsets and
+  relocation entries, and refuses rather than guesses: wrong version, table bounds, closure that does
+  not reach end-of-image, a pre-payload region smaller than the header's block A, or a type-5 section
+  whose payload does not start with `PCD9`. Verified through `oa-asset drm` on the six units above and
+  on 35 sampled records; records that are not DRM units are rejected by version (e.g. `44100`).
+* Geometry comes from type-7/type-2 sections of `lara.drm`; textures from type 5 (`PCD9`/DXT1). Both are
+  reachable with this parser, so Milestone 4 is unblocked by this page even with §4.1 open.
