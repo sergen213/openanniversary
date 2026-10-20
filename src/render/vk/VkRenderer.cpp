@@ -5,12 +5,57 @@
 
 #include <algorithm>
 #include <cstring>
+#include <filesystem>
 
 namespace oa::render {
 namespace {
 
 constexpr std::size_t kSelfCheckSize = 64;
-constexpr VkFormat kSelfCheckFormat = VK_FORMAT_R8G8B8A8_UNORM;
+// Must match the colour format the pipeline's render pass was built against (the swapchain prefers sRGB), otherwise
+// the offscreen pass is not render-pass-compatible with that pipeline.
+constexpr VkFormat kSelfCheckFormat = VK_FORMAT_B8G8R8A8_SRGB;
+// Phase one clears and reads back a bare image with no pipeline involved, so it keeps a plain UNORM format whose
+// stored bytes are the clear floats times 255.
+constexpr VkFormat kClearCheckFormat = VK_FORMAT_R8G8B8A8_UNORM;
+
+// SPIR-V words of a compiled shader module. The build compiles shaders/ to build/shaders (CMake rule), so the
+// repository stores GLSL and the loader only has to read 32-bit words.
+std::vector<std::uint32_t> readSpv(const std::filesystem::path& path, std::string* error) {
+    std::FILE* file = std::fopen(path.string().c_str(), "rb");
+    if (file == nullptr) {
+        if (error != nullptr) *error = "cannot open shader " + path.string();
+        return {};
+    }
+    std::fseek(file, 0, SEEK_END);
+    const long length = std::ftell(file);
+    std::rewind(file);
+    std::vector<unsigned char> raw(length > 0 ? static_cast<std::size_t>(length) : 0);
+    const std::size_t readCount = std::fread(raw.data(), 1, raw.size(), file);
+    std::fclose(file);
+    if (readCount != raw.size() || raw.size() % 4u != 0u) {
+        if (error != nullptr) *error = "shader " + path.string() + " has a truncated SPIR-V body";
+        return {};
+    }
+    std::vector<std::uint32_t> words(raw.size() / 4u);
+    std::memcpy(words.data(), raw.data(), raw.size());
+    if (words.empty() || words[0] != 0x07230203u) {
+        if (error != nullptr) *error = "shader " + path.string() + " is not a SPIR-V module";
+        return {};
+    }
+    return words;
+}
+
+uint32_t findMemoryType(VkPhysicalDevice physical, uint32_t bits, VkMemoryPropertyFlags wanted) {
+    VkPhysicalDeviceMemoryProperties memory{};
+    vkGetPhysicalDeviceMemoryProperties(physical, &memory);
+    for (uint32_t index = 0; index < memory.memoryTypeCount; ++index) {
+        if ((bits & (1u << index)) != 0u &&
+            (memory.memoryTypes[index].propertyFlags & wanted) == wanted) {
+            return index;
+        }
+    }
+    return 0xFFFFFFFFu;
+}
 
 bool check(VkResult result, const char* what, std::string* error) {
     if (result == VK_SUCCESS) return true;
@@ -72,6 +117,7 @@ bool VkRenderer::init(platform::Window& window, const RendererConfig& config, st
     // The command pool has to exist first: createRenderTargets allocates one command buffer per swapchain image.
     if (!createSwapchain(window.widthPixels(), window.heightPixels(), error)) return false;
     if (!createRenderTargets(error)) return false;
+    if (!createPipeline(error)) return false;
     return true;
 }
 
@@ -383,6 +429,7 @@ void VkRenderer::destroySwapchain(bool waitForIdle) {
     }
     images_.clear();
     commands_.clear();
+    destroyPipeline();
     if (renderPass_ != VK_NULL_HANDLE) {
         vkDestroyRenderPass(device_, renderPass_, nullptr);
         renderPass_ = VK_NULL_HANDLE;
@@ -410,6 +457,8 @@ bool VkRenderer::renderFrame(std::string* error) {
         const uint32_t height = std::max(1u, static_cast<uint32_t>(extent_.height));
         if (!createSwapchain(static_cast<int>(width), static_cast<int>(height), error)) return false;
         if (!createRenderTargets(error)) return false;
+        // The pipeline is tied to the render pass it was built against, so it has to come back with its swapchain.
+        if (!createPipeline(error)) return false;
     }
     if (images_.empty()) return false;
 
@@ -442,8 +491,33 @@ bool VkRenderer::renderFrame(std::string* error) {
     passBegin.clearValueCount = 1;
     passBegin.pClearValues = &clear;
     vkCmdBeginRenderPass(command, &passBegin, VK_SUBPASS_CONTENTS_INLINE);
-    // No draw calls yet: the clear pass is Milestone 2's proof that a swapchain image really goes through a
-    // render pass. Geometry arrives when the DRM v14 parser lands (Milestone 4).
+    if (texture_ != VK_NULL_HANDLE && pipeline_ != VK_NULL_HANDLE) {
+        const VkViewport viewport{0.0f, 0.0f, static_cast<float>(extent_.width), static_cast<float>(extent_.height),
+                                  0.0f, 1.0f};
+        vkCmdSetViewport(command, 0, 1, &viewport);
+        const VkRect2D scissor{{0, 0}, extent_};
+        vkCmdSetScissor(command, 0, 1, &scissor);
+        vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
+        const VkDeviceSize vertexOffset = 0;
+        vkCmdBindVertexBuffers(command, 0, 1, &vertexBuffer_, &vertexOffset);
+        vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, 1, &descriptorSet_, 0,
+                                nullptr);
+        // Fit the image inside the window without distorting it: a comparatively wider window shrinks X, a
+        // comparatively taller one shrinks Y (clip-space axes map to pixel extents through the viewport).
+        const float windowAspect = static_cast<float>(extent_.width) / static_cast<float>(extent_.height);
+        struct {
+            float scale[2];
+        } push{};
+        if (textureAspect_ >= windowAspect) {
+            push.scale[0] = 1.0f;
+            push.scale[1] = windowAspect / textureAspect_;
+        } else {
+            push.scale[0] = textureAspect_ / windowAspect;
+            push.scale[1] = 1.0f;
+        }
+        vkCmdPushConstants(command, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), &push);
+        vkCmdDraw(command, 6, 1, 0, 0);
+    }
     vkCmdEndRenderPass(command);
     if (!check(vkEndCommandBuffer(command), "vkEndCommandBuffer", error)) return false;
 
@@ -486,7 +560,7 @@ bool VkRenderer::selfCheck(std::string* error) {
 
     VkImageCreateInfo imageInfo{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     imageInfo.imageType = VK_IMAGE_TYPE_2D;
-    imageInfo.format = kSelfCheckFormat;
+    imageInfo.format = kClearCheckFormat;
     imageInfo.extent = VkExtent3D{static_cast<uint32_t>(kSelfCheckSize), static_cast<uint32_t>(kSelfCheckSize), 1};
     imageInfo.mipLevels = 1;
     imageInfo.arrayLayers = 1;
@@ -638,12 +712,726 @@ bool VkRenderer::selfCheck(std::string* error) {
     }
     OA_LOG(LogLevel::Info, "vk", "self-check passed: {}x{} read-back matches the clear colour", kSelfCheckSize,
            kSelfCheckSize);
+
+    // Second phase: upload a known pattern as a real texture, sample it through the pipeline into an offscreen image
+    // and compare every byte. That covers staging copy, level placement within the payload, descriptor wiring, blend
+    // state and shader math in one measurable path that needs no window (docs/TESTING.md §4). It also pins the UV
+    // orientation: row 0 of the payload has to come back as row 0 of the attachment.
+    constexpr uint32_t kProbeSize = 16;
+    TextureUpload probe;
+    probe.format = kSelfCheckFormat;
+    probe.width = kProbeSize;
+    probe.height = kProbeSize;
+    probe.mipLevels = 1;
+    std::vector<std::byte> pattern(static_cast<std::size_t>(kProbeSize) * kProbeSize * 4u);
+    for (uint32_t y = 0; y < kProbeSize; ++y) {
+        for (uint32_t x = 0; x < kProbeSize; ++x) {
+            const std::size_t at = (static_cast<std::size_t>(y) * kProbeSize + x) * 4u;
+            pattern[at + 0] = static_cast<std::byte>(x * 16u);
+            pattern[at + 1] = static_cast<std::byte>(y * 16u);
+            pattern[at + 2] = static_cast<std::byte>((x + y) * 8u);
+            pattern[at + 3] = static_cast<std::byte>(255u);   // opaque, so the premultiply is the identity
+        }
+    }
+    probe.bytes = pattern.data();
+    probe.byteSize = pattern.size();
+    probe.levels.push_back(TextureUpload::Level{0, static_cast<uint32_t>(pattern.size())});
+
+    std::string uploadError;
+    if (!uploadTexture(probe, &uploadError)) {
+        if (error != nullptr) *error = "self-check could not upload a texture: " + uploadError;
+        return false;
+    }
+
+    VkImageCreateInfo attachmentInfo{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    attachmentInfo.imageType = VK_IMAGE_TYPE_2D;
+    attachmentInfo.format = kSelfCheckFormat;
+    attachmentInfo.extent = VkExtent3D{kProbeSize, kProbeSize, 1};
+    attachmentInfo.mipLevels = 1;
+    attachmentInfo.arrayLayers = 1;
+    attachmentInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    attachmentInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    attachmentInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    attachmentInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkImage attachment = VK_NULL_HANDLE;
+    if (!check(vkCreateImage(device_, &attachmentInfo, nullptr, &attachment), "selfCheck attachment vkCreateImage",
+               error)) {
+        destroyTexture();
+        return false;
+    }
+    VkMemoryRequirements probeRequirements{};
+    vkGetImageMemoryRequirements(device_, attachment, &probeRequirements);
+    const uint32_t probeDeviceLocal =
+        findMemoryType(probeRequirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    VkMemoryAllocateInfo probeAllocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    probeAllocate.allocationSize = probeRequirements.size;
+    probeAllocate.memoryTypeIndex = probeDeviceLocal == 0xFFFFFFFFu ? 0 : probeDeviceLocal;
+    VkDeviceMemory attachmentMemory = VK_NULL_HANDLE;
+    if (!check(vkAllocateMemory(device_, &probeAllocate, nullptr, &attachmentMemory), "selfCheck attachment memory",
+               error)) {
+        vkDestroyImage(device_, attachment, nullptr);
+        destroyTexture();
+        return false;
+    }
+    if (!check(vkBindImageMemory(device_, attachment, attachmentMemory, 0), "selfCheck attachment bind", error)) {
+        vkFreeMemory(device_, attachmentMemory, nullptr);
+        vkDestroyImage(device_, attachment, nullptr);
+        destroyTexture();
+        return false;
+    }
+
+    std::vector<std::byte> drawn;
+    const bool sampled = sampleInto(attachment, VkExtent2D{kProbeSize, kProbeSize}, &drawn, error);
+    int mismatchAt = -1;
+    if (!sampled) {
+        mismatchAt = -2;   // sampleInto already filled *error
+    } else if (drawn.size() != pattern.size()) {
+        mismatchAt = static_cast<int>(drawn.size());
+    } else {
+        for (std::size_t byte = 0; byte < pattern.size(); ++byte) {
+            const int got = static_cast<int>(drawn[byte]);
+            const int want = static_cast<int>(pattern[byte]);
+            if (std::abs(got - want) > 1) {
+                mismatchAt = static_cast<int>(byte);
+                break;
+            }
+        }
+    }
+
+    destroyTexture();
+    vkFreeMemory(device_, attachmentMemory, nullptr);
+    vkDestroyImage(device_, attachment, nullptr);
+
+    if (mismatchAt != -1) {
+        if (error != nullptr && mismatchAt >= 0) {
+            *error = "sampled read-back did not match the uploaded texels (first differing byte index " +
+                     std::to_string(mismatchAt) + ", got " +
+                     std::to_string(static_cast<int>(drawn[static_cast<std::size_t>(mismatchAt)])) + ", wanted " +
+                     std::to_string(static_cast<int>(pattern[static_cast<std::size_t>(mismatchAt)])) + ")";
+        }
+        return false;
+    }
+    OA_LOG(LogLevel::Info, "vk", "self-check passed: sampled {}x{} texture matches the uploaded texels byte for byte",
+           kProbeSize, kProbeSize);
+    return true;
+}
+
+bool VkRenderer::createPipeline(std::string* error) {
+    if (pipeline_ != VK_NULL_HANDLE) return true;   // the set layout survives swapchain recreation
+
+    const std::vector<std::uint32_t> vert = readSpv(std::filesystem::path(config_.shaderDirectory) / "quad.vert.spv",
+                                                    error);
+    if (vert.empty()) return false;
+    const std::vector<std::uint32_t> frag = readSpv(std::filesystem::path(config_.shaderDirectory) / "quad.frag.spv",
+                                                    error);
+    if (frag.empty()) return false;
+
+    VkShaderModuleCreateInfo vertInfo{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    vertInfo.codeSize = vert.size() * 4u;
+    vertInfo.pCode = vert.data();
+    VkShaderModule vertModule = VK_NULL_HANDLE;
+    if (!check(vkCreateShaderModule(device_, &vertInfo, nullptr, &vertModule), "vkCreateShaderModule vertex", error)) {
+        return false;
+    }
+    VkShaderModuleCreateInfo fragInfo{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    fragInfo.codeSize = frag.size() * 4u;
+    fragInfo.pCode = frag.data();
+    VkShaderModule fragModule = VK_NULL_HANDLE;
+    if (!check(vkCreateShaderModule(device_, &fragInfo, nullptr, &fragModule), "vkCreateShaderModule fragment", error)) {
+        vkDestroyShaderModule(device_, vertModule, nullptr);
+        return false;
+    }
+
+    if (descriptorLayout_ == VK_NULL_HANDLE) {
+        const VkDescriptorSetLayoutBinding binding{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
+                                                   VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+        VkDescriptorSetLayoutCreateInfo setLayoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        setLayoutInfo.bindingCount = 1;
+        setLayoutInfo.pBindings = &binding;
+        if (!check(vkCreateDescriptorSetLayout(device_, &setLayoutInfo, nullptr, &descriptorLayout_),
+                   "vkCreateDescriptorSetLayout", error)) {
+            vkDestroyShaderModule(device_, vertModule, nullptr);
+            vkDestroyShaderModule(device_, fragModule, nullptr);
+            return false;
+        }
+    }
+
+    const VkPushConstantRange pushRange{VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(float) * 2u};
+    VkPipelineLayoutCreateInfo pipelineLayoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    pipelineLayoutInfo.setLayoutCount = 1;
+    pipelineLayoutInfo.pSetLayouts = &descriptorLayout_;
+    pipelineLayoutInfo.pushConstantRangeCount = 1;
+    pipelineLayoutInfo.pPushConstantRanges = &pushRange;
+    if (!check(vkCreatePipelineLayout(device_, &pipelineLayoutInfo, nullptr, &pipelineLayout_),
+               "vkCreatePipelineLayout", error)) {
+        vkDestroyShaderModule(device_, vertModule, nullptr);
+        vkDestroyShaderModule(device_, fragModule, nullptr);
+        return false;
+    }
+
+    // Position plus texture coordinate. Clip y = -1 is the top of the framebuffer in Vulkan, so v = 0 (the payload's
+    // first row) sits on that edge and the image reads upright instead of mirrored.
+    static constexpr float kQuad[6][4] = {
+        {-1.0f, -1.0f, 0.0f, 0.0f}, {1.0f, -1.0f, 1.0f, 0.0f}, {-1.0f, 1.0f, 0.0f, 1.0f},
+        {1.0f, -1.0f, 1.0f, 0.0f}, {-1.0f, 1.0f, 0.0f, 1.0f}, {1.0f, 1.0f, 1.0f, 1.0f},
+    };
+    if (vertexBuffer_ == VK_NULL_HANDLE) {
+        VkBufferCreateInfo bufferInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        bufferInfo.size = sizeof(kQuad);
+        bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+        bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (!check(vkCreateBuffer(device_, &bufferInfo, nullptr, &vertexBuffer_), "vertex vkCreateBuffer", error)) {
+            vkDestroyShaderModule(device_, vertModule, nullptr);
+            vkDestroyShaderModule(device_, fragModule, nullptr);
+            return false;
+        }
+        VkMemoryRequirements requirements{};
+        vkGetBufferMemoryRequirements(device_, vertexBuffer_, &requirements);
+        const uint32_t hostVisible = findMemoryType(physical_, requirements.memoryTypeBits,
+                                                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                                        VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        allocate.allocationSize = requirements.size;
+        allocate.memoryTypeIndex = hostVisible == 0xFFFFFFFFu ? 0 : hostVisible;
+        if (!check(vkAllocateMemory(device_, &allocate, nullptr, &vertexMemory_), "vertex vkAllocateMemory", error)) {
+            vkDestroyShaderModule(device_, vertModule, nullptr);
+            vkDestroyShaderModule(device_, fragModule, nullptr);
+            return false;
+        }
+        vkBindBufferMemory(device_, vertexBuffer_, vertexMemory_, 0);
+        void* mapped = nullptr;
+        if (!check(vkMapMemory(device_, vertexMemory_, 0, VK_WHOLE_SIZE, 0, &mapped), "vertex vkMapMemory", error)) {
+            vkDestroyShaderModule(device_, vertModule, nullptr);
+            vkDestroyShaderModule(device_, fragModule, nullptr);
+            return false;
+        }
+        std::memcpy(mapped, kQuad, sizeof(kQuad));
+        vkUnmapMemory(device_, vertexMemory_);
+    }
+
+    const VkPipelineShaderStageCreateInfo stages[2] = {
+        VkPipelineShaderStageCreateInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0,
+                                        VK_SHADER_STAGE_VERTEX_BIT, vertModule, "main", nullptr},
+        VkPipelineShaderStageCreateInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0,
+                                        VK_SHADER_STAGE_FRAGMENT_BIT, fragModule, "main", nullptr},
+    };
+    const VkVertexInputBindingDescription binding{0, sizeof(float) * 4u, VK_VERTEX_INPUT_RATE_VERTEX};
+    const VkVertexInputAttributeDescription attributes[2] = {
+        VkVertexInputAttributeDescription{0, 0, VK_FORMAT_R32G32_SFLOAT, 0},
+        VkVertexInputAttributeDescription{1, 0, VK_FORMAT_R32G32_SFLOAT, sizeof(float) * 2u},
+    };
+    VkPipelineVertexInputStateCreateInfo vertexInput{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    vertexInput.vertexBindingDescriptionCount = 1;
+    vertexInput.pVertexBindingDescriptions = &binding;
+    vertexInput.vertexAttributeDescriptionCount = 2;
+    vertexInput.pVertexAttributeDescriptions = attributes;
+
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    const VkDynamicState dynamicStates[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineViewportStateCreateInfo viewportState{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+    viewportState.viewportCount = 1;
+    viewportState.scissorCount = 1;
+    VkPipelineDynamicStateCreateInfo dynamicState{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+    dynamicState.dynamicStateCount = 2;
+    dynamicState.pDynamicStates = dynamicStates;
+
+    VkPipelineRasterizationStateCreateInfo rasterizer{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterizer.lineWidth = 1.0f;
+    // Nothing to cull: the quad is drawn facing whichever way the vertex order happens to fall, and back-face
+    // removal would only make a resize bug look like an empty window.
+    rasterizer.cullMode = VK_CULL_MODE_NONE;
+    rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+
+    VkPipelineMultisampleStateCreateInfo multisample{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    // Premultiplied source over the clear colour, which is what quad.frag writes. BC1/BC3 carry their own alpha and
+    // tag-0x15 masks are white with their shape in alpha (docs/formats/TEXTURES.md §3).
+    VkPipelineColorBlendAttachmentState blend{};
+    blend.blendEnable = VK_TRUE;
+    blend.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+    blend.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    blend.colorBlendOp = VK_BLEND_OP_ADD;
+    blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    blend.alphaBlendOp = VK_BLEND_OP_ADD;
+    blend.colorWriteMask = 0xFu;
+    VkPipelineColorBlendStateCreateInfo colorBlend{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+    colorBlend.attachmentCount = 1;
+    colorBlend.pAttachments = &blend;
+
+    const VkPipelineDepthStencilStateCreateInfo depthStencil{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    VkGraphicsPipelineCreateInfo pipelineInfo{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    pipelineInfo.stageCount = 2;
+    pipelineInfo.pStages = stages;
+    pipelineInfo.pVertexInputState = &vertexInput;
+    pipelineInfo.pDynamicState = &dynamicState;
+    pipelineInfo.pInputAssemblyState = &inputAssembly;
+    pipelineInfo.pViewportState = &viewportState;
+    pipelineInfo.pRasterizationState = &rasterizer;
+    pipelineInfo.pMultisampleState = &multisample;
+    pipelineInfo.pDepthStencilState = &depthStencil;
+    pipelineInfo.pColorBlendState = &colorBlend;
+    pipelineInfo.layout = pipelineLayout_;
+    pipelineInfo.renderPass = renderPass_;
+    pipelineInfo.subpass = 0;
+    const bool built = check(vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline_),
+                             "vkCreateGraphicsPipelines", error);
+    vkDestroyShaderModule(device_, vertModule, nullptr);
+    vkDestroyShaderModule(device_, fragModule, nullptr);
+    if (!built) return false;
+
+    OA_LOG(LogLevel::Info, "vk", "graphics pipeline ready: textured quad with premultiplied blending");
+    return true;
+}
+
+void VkRenderer::destroyPipeline() {
+    if (pipeline_ != VK_NULL_HANDLE && device_ != VK_NULL_HANDLE) vkDestroyPipeline(device_, pipeline_, nullptr);
+    pipeline_ = VK_NULL_HANDLE;
+    if (pipelineLayout_ != VK_NULL_HANDLE && device_ != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(device_, pipelineLayout_, nullptr);
+    }
+    pipelineLayout_ = VK_NULL_HANDLE;
+}
+
+void VkRenderer::destroyTexture() {
+    if (device_ == VK_NULL_HANDLE) return;
+    if (sampler_ != VK_NULL_HANDLE) vkDestroySampler(device_, sampler_, nullptr);
+    if (textureView_ != VK_NULL_HANDLE) vkDestroyImageView(device_, textureView_, nullptr);
+    if (descriptorPool_ != VK_NULL_HANDLE) vkDestroyDescriptorPool(device_, descriptorPool_, nullptr);
+    if (textureMemory_ != VK_NULL_HANDLE) vkFreeMemory(device_, textureMemory_, nullptr);
+    if (texture_ != VK_NULL_HANDLE) vkDestroyImage(device_, texture_, nullptr);
+    sampler_ = VK_NULL_HANDLE;
+    textureView_ = VK_NULL_HANDLE;
+    descriptorPool_ = VK_NULL_HANDLE;
+    descriptorSet_ = VK_NULL_HANDLE;
+    textureMemory_ = VK_NULL_HANDLE;
+    texture_ = VK_NULL_HANDLE;
+    textureMipLevels_ = 0;
+}
+
+bool VkRenderer::uploadTexture(const TextureUpload& texture, std::string* error) {
+    if (device_ == VK_NULL_HANDLE) {
+        if (error != nullptr) *error = "renderer not initialised";
+        return false;
+    }
+    if (texture.format == VK_FORMAT_UNDEFINED || texture.width == 0u || texture.height == 0u ||
+        texture.bytes == nullptr || texture.mipLevels == 0u || texture.levels.size() != texture.mipLevels) {
+        if (error != nullptr) *error = "uploadTexture: incomplete texture description";
+        return false;
+    }
+    std::uint64_t covered = 0;
+    for (const TextureUpload::Level& level : texture.levels) covered += level.bytes;
+    if (covered != texture.byteSize) {
+        if (error != nullptr) {
+            *error = "uploadTexture: levels cover " + std::to_string(covered) + " bytes, payload is " +
+                     std::to_string(texture.byteSize);
+        }
+        return false;
+    }
+
+    vkDeviceWaitIdle(device_);
+    destroyTexture();
+
+    VkBufferCreateInfo stagingInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    stagingInfo.size = texture.byteSize;
+    stagingInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    stagingInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    VkBuffer staging = VK_NULL_HANDLE;
+    if (!check(vkCreateBuffer(device_, &stagingInfo, nullptr, &staging), "texture staging vkCreateBuffer", error)) {
+        return false;
+    }
+    VkMemoryRequirements requirements{};
+    vkGetBufferMemoryRequirements(device_, staging, &requirements);
+    const uint32_t hostVisible = findMemoryType(physical_, requirements.memoryTypeBits,
+                                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                                    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    allocate.allocationSize = requirements.size;
+    allocate.memoryTypeIndex = hostVisible == 0xFFFFFFFFu ? 0 : hostVisible;
+    VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+    const auto releaseStaging = [&]() {
+        if (stagingMemory != VK_NULL_HANDLE) vkFreeMemory(device_, stagingMemory, nullptr);
+        if (staging != VK_NULL_HANDLE) vkDestroyBuffer(device_, staging, nullptr);
+    };
+    if (!check(vkAllocateMemory(device_, &allocate, nullptr, &stagingMemory), "texture staging vkAllocateMemory",
+               error)) {
+        releaseStaging();
+        return false;
+    }
+    if (!check(vkBindBufferMemory(device_, staging, stagingMemory, 0), "texture staging vkBindBufferMemory", error)) {
+        releaseStaging();
+        return false;
+    }
+    void* mapped = nullptr;
+    if (!check(vkMapMemory(device_, stagingMemory, 0, VK_WHOLE_SIZE, 0, &mapped), "texture vkMapMemory", error)) {
+        releaseStaging();
+        return false;
+    }
+    std::memcpy(mapped, texture.bytes, texture.byteSize);
+    vkUnmapMemory(device_, stagingMemory);
+
+    VkImageCreateInfo imageInfo{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    imageInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageInfo.format = texture.format;
+    imageInfo.extent = VkExtent3D{texture.width, texture.height, 1};
+    imageInfo.mipLevels = texture.mipLevels;
+    imageInfo.arrayLayers = 1;
+    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (!check(vkCreateImage(device_, &imageInfo, nullptr, &texture_), "texture vkCreateImage", error)) {
+        releaseStaging();
+        return false;
+    }
+    vkGetImageMemoryRequirements(device_, texture_, &requirements);
+    const uint32_t deviceLocal =
+        findMemoryType(physical_, requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    allocate = VkMemoryAllocateInfo{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    allocate.allocationSize = requirements.size;
+    allocate.memoryTypeIndex = deviceLocal == 0xFFFFFFFFu ? 0 : deviceLocal;
+    if (!check(vkAllocateMemory(device_, &allocate, nullptr, &textureMemory_), "texture vkAllocateMemory", error)) {
+        destroyTexture();
+        releaseStaging();
+        return false;
+    }
+    if (!check(vkBindImageMemory(device_, texture_, textureMemory_, 0), "texture vkBindImageMemory", error)) {
+        destroyTexture();
+        releaseStaging();
+        return false;
+    }
+
+    VkCommandBufferAllocateInfo commandAllocate{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    commandAllocate.commandPool = commandPool_;
+    commandAllocate.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    commandAllocate.commandBufferCount = 1;
+    VkCommandBuffer command = nullptr;
+    if (!check(vkAllocateCommandBuffers(device_, &commandAllocate, &command), "texture allocate command buffer",
+               error)) {
+        destroyTexture();
+        releaseStaging();
+        return false;
+    }
+    VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (!check(vkBeginCommandBuffer(command, &begin), "texture vkBeginCommandBuffer", error)) {
+        destroyTexture();
+        releaseStaging();
+        return false;
+    }
+
+    const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, texture.mipLevels, 0, 1};
+    // The payload is already packed largest-level-first (cdc::pcd9LevelRegions), so each level copies from its own
+    // buffer offset with tightly packed rows.
+    VkImageMemoryBarrier toTransferDst{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    toTransferDst.srcAccessMask = 0;
+    toTransferDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    toTransferDst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    toTransferDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    toTransferDst.image = texture_;
+    toTransferDst.subresourceRange = range;
+    vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
+                         nullptr, 1, &toTransferDst);
+    for (uint32_t level = 0; level < texture.mipLevels; ++level) {
+        const VkBufferImageCopy region{texture.levels[level].offset, 0, 0,
+                                       VkImageSubresourceLayers{VK_IMAGE_ASPECT_COLOR_BIT, level, 0, 1},
+                                       VkOffset3D{0, 0, 0},
+                                       VkExtent3D{std::max(1u, texture.width >> level), std::max(1u, texture.height >> level), 1}};
+        vkCmdCopyBufferToImage(command, staging, texture_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    }
+    VkImageMemoryBarrier toSampled{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    toSampled.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    toSampled.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    toSampled.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    toSampled.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    toSampled.image = texture_;
+    toSampled.subresourceRange = range;
+    vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr,
+                         0, nullptr, 1, &toSampled);
+    if (!check(vkEndCommandBuffer(command), "texture vkEndCommandBuffer", error)) {
+        destroyTexture();
+        releaseStaging();
+        return false;
+    }
+    VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    VkFence fence = VK_NULL_HANDLE;
+    if (!check(vkCreateFence(device_, &fenceInfo, nullptr, &fence), "texture vkCreateFence", error)) {
+        destroyTexture();
+        releaseStaging();
+        return false;
+    }
+    VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &command;
+    VkResult result = vkQueueSubmit(queue_, 1, &submit, fence);
+    if (result == VK_SUCCESS) result = vkWaitForFences(device_, 1, &fence, VK_TRUE, ~0ull);
+    vkDestroyFence(device_, fence, nullptr);
+    releaseStaging();
+    if (!check(result, "texture upload submit", error)) {
+        destroyTexture();
+        return false;
+    }
+
+    VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    viewInfo.image = texture_;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format = texture.format;
+    viewInfo.subresourceRange = range;
+    if (!check(vkCreateImageView(device_, &viewInfo, nullptr, &textureView_), "texture vkCreateImageView", error)) {
+        destroyTexture();
+        return false;
+    }
+    VkSamplerCreateInfo samplerInfo{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+    samplerInfo.magFilter = VK_FILTER_LINEAR;
+    samplerInfo.minFilter = VK_FILTER_LINEAR;
+    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    // Every level of the chain is real data here, so sampling may use all of it instead of only the first.
+    samplerInfo.maxLod = static_cast<float>(texture.mipLevels - 1u);
+    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    if (!check(vkCreateSampler(device_, &samplerInfo, nullptr, &sampler_), "texture vkCreateSampler", error)) {
+        destroyTexture();
+        return false;
+    }
+
+    const VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1};
+    VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    poolInfo.maxSets = 1;
+    poolInfo.poolSizeCount = 1;
+    poolInfo.pPoolSizes = &poolSize;
+    if (!check(vkCreateDescriptorPool(device_, &poolInfo, nullptr, &descriptorPool_), "texture vkCreateDescriptorPool",
+               error)) {
+        destroyTexture();
+        return false;
+    }
+    VkDescriptorSetAllocateInfo setAllocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    setAllocate.descriptorPool = descriptorPool_;
+    setAllocate.descriptorSetCount = 1;
+    setAllocate.pSetLayouts = &descriptorLayout_;
+    if (!check(vkAllocateDescriptorSets(device_, &setAllocate, &descriptorSet_), "texture vkAllocateDescriptorSets",
+               error)) {
+        destroyTexture();
+        return false;
+    }
+    // VkDescriptorImageInfo lists the sampler first; a null sampler here makes the combined-image write invalid.
+    const VkDescriptorImageInfo described{sampler_, textureView_, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    write.dstSet = descriptorSet_;
+    write.dstBinding = 0;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.pImageInfo = &described;
+    vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
+
+    textureAspect_ = static_cast<float>(texture.width) / static_cast<float>(texture.height);
+    textureMipLevels_ = texture.mipLevels;
+    OA_LOG(LogLevel::Info, "vk", "uploaded {}x{} texture: format={} levels={} bytes={}", texture.width,
+           texture.height, static_cast<int>(texture.format), texture.mipLevels,
+           static_cast<unsigned long long>(texture.byteSize));
+    return true;
+}
+
+// Draws the bound textured quad into an offscreen attachment and reads the pixels back. `colourAttachment` has to use
+// kSelfCheckFormat, because that is what this pass declares and the pipeline it draws with was built for that format.
+// upload → descriptor → pipeline → blend through real command submission, without a window in sight.
+bool VkRenderer::sampleInto(VkImage colourAttachment, VkExtent2D size, std::vector<std::byte>* outRgba,
+                            std::string* error) {
+    if (outRgba == nullptr || pipeline_ == VK_NULL_HANDLE || descriptorSet_ == VK_NULL_HANDLE) {
+        if (error != nullptr) *error = "sampleInto needs a pipeline and an uploaded texture";
+        return false;
+    }
+
+    VkAttachmentDescription attachment{};
+    attachment.format = kSelfCheckFormat;
+    attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    // The pass hands the image straight to the copy-out layout, so no extra barrier is needed here.
+    attachment.finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    const VkAttachmentReference colorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1;
+    subpass.pColorAttachments = &colorRef;
+    const VkSubpassDependency dependency{VK_SUBPASS_EXTERNAL,
+                                         0,
+                                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                         0,
+                                         VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT};
+    VkRenderPassCreateInfo passInfo{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+    passInfo.attachmentCount = 1;
+    passInfo.pAttachments = &attachment;
+    passInfo.subpassCount = 1;
+    passInfo.pSubpasses = &subpass;
+    passInfo.dependencyCount = 1;
+    passInfo.pDependencies = &dependency;
+    VkRenderPass pass = VK_NULL_HANDLE;
+    if (!check(vkCreateRenderPass(device_, &passInfo, nullptr, &pass), "sampleInto vkCreateRenderPass", error)) {
+        return false;
+    }
+
+    VkImageView view = VK_NULL_HANDLE;
+    VkFramebuffer framebuffer = VK_NULL_HANDLE;
+    VkBuffer readback = VK_NULL_HANDLE;
+    VkDeviceMemory readbackMemory = VK_NULL_HANDLE;
+    const auto release = [&]() {
+        if (readbackMemory != VK_NULL_HANDLE) vkFreeMemory(device_, readbackMemory, nullptr);
+        if (readback != VK_NULL_HANDLE) vkDestroyBuffer(device_, readback, nullptr);
+        if (framebuffer != VK_NULL_HANDLE) vkDestroyFramebuffer(device_, framebuffer, nullptr);
+        if (view != VK_NULL_HANDLE) vkDestroyImageView(device_, view, nullptr);
+        if (pass != VK_NULL_HANDLE) vkDestroyRenderPass(device_, pass, nullptr);
+    };
+
+    VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    viewInfo.image = colourAttachment;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format = kSelfCheckFormat;
+    viewInfo.subresourceRange = VkImageSubresourceRange{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    if (!check(vkCreateImageView(device_, &viewInfo, nullptr, &view), "sampleInto vkCreateImageView", error)) {
+        release();
+        return false;
+    }
+    VkFramebufferCreateInfo framebufferInfo{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+    framebufferInfo.renderPass = pass;
+    framebufferInfo.attachmentCount = 1;
+    framebufferInfo.pAttachments = &view;
+    framebufferInfo.width = size.width;
+    framebufferInfo.height = size.height;
+    framebufferInfo.layers = 1;
+    if (!check(vkCreateFramebuffer(device_, &framebufferInfo, nullptr, &framebuffer), "sampleInto vkCreateFramebuffer",
+               error)) {
+        release();
+        return false;
+    }
+
+    const std::size_t pixelBytes = static_cast<std::size_t>(size.width) * size.height * 4u;
+    VkBufferCreateInfo readbackInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    readbackInfo.size = pixelBytes;
+    readbackInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    readbackInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (!check(vkCreateBuffer(device_, &readbackInfo, nullptr, &readback), "sampleInto vkCreateBuffer", error)) {
+        release();
+        return false;
+    }
+    VkMemoryRequirements requirements{};
+    vkGetBufferMemoryRequirements(device_, readback, &requirements);
+    const uint32_t hostVisible = findMemoryType(physical_, requirements.memoryTypeBits,
+                                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                                    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    allocate.allocationSize = requirements.size;
+    allocate.memoryTypeIndex = hostVisible == 0xFFFFFFFFu ? 0 : hostVisible;
+    if (!check(vkAllocateMemory(device_, &allocate, nullptr, &readbackMemory), "sampleInto vkAllocateMemory", error)) {
+        release();
+        return false;
+    }
+    if (!check(vkBindBufferMemory(device_, readback, readbackMemory, 0), "sampleInto vkBindBufferMemory", error)) {
+        release();
+        return false;
+    }
+
+    VkCommandBufferAllocateInfo commandAllocate{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    commandAllocate.commandPool = commandPool_;
+    commandAllocate.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    commandAllocate.commandBufferCount = 1;
+    VkCommandBuffer command = nullptr;
+    if (!check(vkAllocateCommandBuffers(device_, &commandAllocate, &command), "sampleInto allocate command buffer",
+               error)) {
+        release();
+        return false;
+    }
+    VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (!check(vkBeginCommandBuffer(command, &begin), "sampleInto vkBeginCommandBuffer", error)) {
+        release();
+        return false;
+    }
+    // Transparent clear: the blend is premultiplied-source-over, so what arrives in the attachment is exactly what
+    // the shader produced.
+    const VkClearValue clear{VkClearColorValue{{0.0f, 0.0f, 0.0f, 0.0f}}};
+    VkRenderPassBeginInfo passBegin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+    passBegin.renderPass = pass;
+    passBegin.framebuffer = framebuffer;
+    passBegin.renderArea = VkRect2D{{0, 0}, size};
+    passBegin.clearValueCount = 1;
+    passBegin.pClearValues = &clear;
+    vkCmdBeginRenderPass(command, &passBegin, VK_SUBPASS_CONTENTS_INLINE);
+    const VkViewport viewport{0.0f, 0.0f, static_cast<float>(size.width), static_cast<float>(size.height), 0.0f, 1.0f};
+    vkCmdSetViewport(command, 0, 1, &viewport);
+    const VkRect2D scissor{{0, 0}, size};
+    vkCmdSetScissor(command, 0, 1, &scissor);
+    vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
+    const VkDeviceSize vertexOffset = 0;
+    vkCmdBindVertexBuffers(command, 0, 1, &vertexBuffer_, &vertexOffset);
+    vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, 1, &descriptorSet_, 0,
+                            nullptr);
+    const struct {
+        float scale[2];
+    } push{{1.0f, 1.0f}};
+    vkCmdPushConstants(command, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), &push);
+    vkCmdDraw(command, 6, 1, 0, 0);
+    vkCmdEndRenderPass(command);
+    const VkBufferImageCopy region{0,
+                                   0,
+                                   0,
+                                   VkImageSubresourceLayers{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                                   VkOffset3D{0, 0, 0},
+                                   VkExtent3D{size.width, size.height, 1}};
+    vkCmdCopyImageToBuffer(command, colourAttachment, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, readback, 1, &region);
+    if (!check(vkEndCommandBuffer(command), "sampleInto vkEndCommandBuffer", error)) {
+        release();
+        return false;
+    }
+    VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    VkFence fence = VK_NULL_HANDLE;
+    if (!check(vkCreateFence(device_, &fenceInfo, nullptr, &fence), "sampleInto vkCreateFence", error)) {
+        release();
+        return false;
+    }
+    VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &command;
+    VkResult result = vkQueueSubmit(queue_, 1, &submit, fence);
+    if (result == VK_SUCCESS) result = vkWaitForFences(device_, 1, &fence, VK_TRUE, ~0ull);
+    vkDestroyFence(device_, fence, nullptr);
+    if (!check(result, "sampleInto submit", error)) {
+        release();
+        return false;
+    }
+
+    void* mapped = nullptr;
+    if (!check(vkMapMemory(device_, readbackMemory, 0, VK_WHOLE_SIZE, 0, &mapped), "sampleInto vkMapMemory", error)) {
+        release();
+        return false;
+    }
+    const auto* pixels = static_cast<const std::byte*>(mapped);
+    outRgba->assign(pixels, pixels + pixelBytes);
+    vkUnmapMemory(device_, readbackMemory);
+    release();
     return true;
 }
 
 void VkRenderer::shutdown() {
     if (device_ != VK_NULL_HANDLE) vkDeviceWaitIdle(device_);
     destroySwapchain(false);
+    destroyPipeline();
+    destroyTexture();
+    if (descriptorLayout_ != VK_NULL_HANDLE && device_ != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(device_, descriptorLayout_, nullptr);
+        descriptorLayout_ = VK_NULL_HANDLE;
+    }
+    if (vertexMemory_ != VK_NULL_HANDLE && device_ != VK_NULL_HANDLE) vkFreeMemory(device_, vertexMemory_, nullptr);
+    if (vertexBuffer_ != VK_NULL_HANDLE && device_ != VK_NULL_HANDLE) vkDestroyBuffer(device_, vertexBuffer_, nullptr);
+    vertexMemory_ = VK_NULL_HANDLE;
+    vertexBuffer_ = VK_NULL_HANDLE;
     if (commandPool_ != VK_NULL_HANDLE && device_ != VK_NULL_HANDLE) {
         vkDestroyCommandPool(device_, commandPool_, nullptr);
         commandPool_ = VK_NULL_HANDLE;

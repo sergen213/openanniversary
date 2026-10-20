@@ -42,20 +42,29 @@ std::uint64_t blockBytesOf(std::uint32_t tag) {
 
 }  // namespace
 
-std::uint64_t pcd9MipChainBytes(const Pcd9Info& info) {
-    if (info.mipLevels == 0) return 0;
-    std::uint64_t total = 0;
+std::vector<Pcd9LevelRegion> pcd9LevelRegions(const Pcd9Info& info) {
+    std::vector<Pcd9LevelRegion> regions;
+    if (info.mipLevels == 0) return regions;
+    std::uint64_t offset = 0;
     for (std::uint32_t level = 0; level < info.mipLevels; ++level) {
-        const std::uint32_t w = dimAt(info.width, level);
-        const std::uint32_t h = dimAt(info.height, level);
+        std::uint64_t bytes = 0;
         if (info.tag == static_cast<std::uint32_t>(Pcd9Format::Uncompressed32)) {
-            total += static_cast<std::uint64_t>(w) * h * 4u;
+            const std::uint32_t w = dimAt(info.width, level);
+            const std::uint32_t h = dimAt(info.height, level);
+            bytes = static_cast<std::uint64_t>(w) * h * 4u;
         } else {
             const std::uint64_t perBlock = blockBytesOf(info.tag);
-            total += static_cast<std::uint64_t>(blocksAt(info.width, level)) *
-                     blocksAt(info.height, level) * perBlock;
+            bytes = static_cast<std::uint64_t>(blocksAt(info.width, level)) * blocksAt(info.height, level) * perBlock;
         }
+        regions.push_back(Pcd9LevelRegion{offset, static_cast<std::uint32_t>(bytes)});
+        offset += bytes;
     }
+    return regions;
+}
+
+std::uint64_t pcd9MipChainBytes(const Pcd9Info& info) {
+    std::uint64_t total = 0;
+    for (const Pcd9LevelRegion& region : pcd9LevelRegions(info)) total += region.bytes;
     return total;
 }
 

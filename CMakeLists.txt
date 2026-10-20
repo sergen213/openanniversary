@@ -23,6 +23,21 @@ find_package(ZLIB REQUIRED)
 find_package(SDL3 REQUIRED CONFIG)
 find_package(Vulkan REQUIRED)
 
+# Shaders compile to SPIR-V at build time and load from <executable dir>/shaders at run time, so the repository
+# stores GLSL rather than a binary blob and every shader shows up in the build log.
+find_program(OA_GLSLANG glslangValidator REQUIRED)
+set(OA_SHADER_OUTPUTS "")
+foreach(source IN ITEMS shaders/quad.vert shaders/quad.frag)
+  get_filename_component(shaderName "${source}" NAME)
+  set(shaderOutput "${CMAKE_BINARY_DIR}/shaders/${shaderName}.spv")
+  add_custom_command(OUTPUT "${shaderOutput}"
+    COMMAND ${OA_GLSLANG} -V "${CMAKE_CURRENT_SOURCE_DIR}/${source}" -o "${shaderOutput}"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${source}"
+    COMMENT "SPIR-V ${shaderName}")
+  list(APPEND OA_SHADER_OUTPUTS "${shaderOutput}")
+endforeach()
+add_custom_target(oa_shaders ALL DEPENDS ${OA_SHADER_OUTPUTS})
+
 # cdc container layer: bigfile archives of the Legend-era engine (docs/formats/CONTAINERS.md).
 add_library(oa_cdc STATIC src/cdc/Bigfile.cpp src/cdc/Drm.cpp src/cdc/Texture.cpp)
 target_include_directories(oa_cdc PUBLIC src)
@@ -45,6 +60,7 @@ target_link_libraries(oa_render PUBLIC oa_platform Vulkan::Vulkan)
 
 add_executable(oa-game apps/game/main.cpp)
 target_link_libraries(oa-game PRIVATE oa_render oa_cdc)
+add_dependencies(oa-game oa_shaders)
 
 if(OA_BUILD_TESTS)
   enable_testing()

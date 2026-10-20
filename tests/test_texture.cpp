@@ -118,3 +118,25 @@ TEST(Pcd9, rejectsUncompressedWithWrongBpp) {
 }
 
 }  // namespace
+
+TEST(Pcd9, levelRegionsPackTheChainWithoutGaps) {
+    const auto regions = oa::cdc::pcd9LevelRegions(infoOf(static_cast<std::uint32_t>(Pcd9Format::Dxt1), 8, 8, 0, 4));
+    ASSERT_EQ(regions.size(), 4u);
+    EXPECT_EQ(regions[0].offset, 0u);   // 2x2 blocks of 8 bytes
+    EXPECT_EQ(regions[0].bytes, 32u);
+    EXPECT_EQ(regions[1].offset, 32u);  // 4x4 texels -> one block
+    EXPECT_EQ(regions[1].bytes, 8u);
+    EXPECT_EQ(regions[2].offset, 40u);
+    EXPECT_EQ(regions[3].offset, 48u);
+    std::uint64_t total = 0;
+    for (const auto& region : regions) total += region.bytes;
+    EXPECT_EQ(total, oa::cdc::pcd9MipChainBytes(infoOf(static_cast<std::uint32_t>(Pcd9Format::Dxt1), 8, 8, 0, 4)));
+
+    // lara.drm section 0: the tail of a 512-wide chain is two single-block levels.
+    const auto wide = oa::cdc::pcd9LevelRegions(
+        infoOf(static_cast<std::uint32_t>(Pcd9Format::Dxt1), 512, 512, 0, 10));
+    ASSERT_EQ(wide.size(), 10u);
+    EXPECT_EQ(wide[0].bytes, 131072u);
+    EXPECT_EQ(wide[8].offset, 174760u);
+    EXPECT_EQ(wide[9].bytes, 8u);
+}

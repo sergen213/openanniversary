@@ -36,15 +36,21 @@ possible and is the reason `oa_tests` currently runs in 10 ms.
 ## Runtime shape (Milestone 2, current)
 
 `apps/game/main.cpp` reads configuration (defaults < `openanniversary.ini`/`$OA_CONFIG` < `--key=value`), opens the
-container if `gameDir` is set (logging record and part counts as a smoke test of the asset path), creates an SDL3
-window, initialises Vulkan with the validation layer when available, then loops: pump events → resize check → clear
-pass into a swapchain image → present. The frame loop uses one fence plus one acquire semaphore per swapchain image,
-which is enough to keep exactly one frame in flight while still overlapping acquisition and submission.
+container if `gameDir` is set (logging record and part counts as a smoke test of the asset path) and, when `--texture`
+names a record, parses it as a DRM v14 unit far enough to upload one PCD9 mip chain. Then it creates an SDL3 window,
+initialises Vulkan with the validation layer when available, and loops: pump events → resize check → clear pass into a
+swapchain image, with the bound textured quad drawn over it whenever a texture is uploaded (premultiplied alpha, one push
+constant for the aspect-fit letterbox) → present. The frame loop uses one fence plus one acquire semaphore per swapchain
+image, which is enough to keep exactly one frame in flight while still overlapping acquisition and submission.
 
-`VkRenderer::selfCheck()` proves the device path independent of what is on screen: it clears an offscreen
-`R8G8B8A8_UNORM` image, copies it into host-visible memory and compares every pixel against the clear colour within a
-rounding tolerance of one byte. That is the repeatable test hook CI uses; the swapchain path is exercised by counting
-presented frames.
+`VkRenderer::selfCheck()` proves the device path independent of what is on screen, in two phases. It clears an offscreen
+`R8G8B8A8_UNORM` image (unorm keeps clear floats linear) and compares every read-back pixel against the clear colour
+within one byte; then it uploads a synthetic `B8G8R8A8_SRGB` texture through `uploadTexture()` and samples it with the
+*swapchain pipeline* into an offscreen attachment that is render-pass-compatible with it, comparing bytes again. The
+second phase is what catches descriptor, layout-transition and blend mistakes, and its attachment format has to equal the
+pipeline's colour format or the draw is invalid. That pair is the repeatable test hook CI uses; the swapchain path is
+exercised by counting presented frames. A resize recreates swapchain, render pass and pipeline together, because a
+pipeline belongs to the pass it was built against.
 
 ## Deliberate omissions so far
 

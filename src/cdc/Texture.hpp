@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <span>
 #include <string>
+#include <vector>
 
 namespace oa::cdc {
 
@@ -38,5 +39,15 @@ bool parsePcd9(std::span<const std::byte> payload, Pcd9Info* out, std::string* e
 // Expected byte count of a full mip chain for the given format/extent/level count; 0 when the level
 // count cannot describe a coherent chain. Exposed because both validation and the upload path need it.
 std::uint64_t pcd9MipChainBytes(const Pcd9Info& info);
+
+// One level of a packed mip chain: byte offset from the start of the payload plus its length. An uploader
+// needs these because vkCmdCopyBufferToImage takes one region per mip level.
+struct Pcd9LevelRegion {
+    std::uint64_t offset = 0;
+    std::uint32_t bytes = 0;
+};
+
+// Regions in payload order (largest level first); totals agree with pcd9MipChainBytes.
+std::vector<Pcd9LevelRegion> pcd9LevelRegions(const Pcd9Info& info);
 
 }  // namespace oa::cdc
