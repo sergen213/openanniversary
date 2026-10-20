@@ -130,6 +130,15 @@ zero version and has no releases yet.
   handler in `tra.exe` (`FUN_005bc830`, vtable `PTR_FUN_00657338`) keeps them in a 32,768-slot refcounted cache (block of
   `size + 0x10`, u16 refcount at +0, data at +0x10). Type 7 is shared resource instances, not model geometry; the handler
   table itself resolves as `DAT_0088e2b0 + type*4` with slot 5 being the texture handler.
+- Level oct-tree and triangle-strip indices decoded from shipped bytes (`docs/formats/GEOMETRY.md` §9): unit `8baf540e`
+  section 86 holds a node array of `{bounding sphere (4 floats), leaf reference u32 at +16, child count s32 at +20, self-
+  relative u32 child offsets}`; walking from offset 0 visits 623 nodes / 533 leaves to depth 6 with no anomalies. All 533
+  leaf reference slots are relocation sites pointing into 34 sibling sections (16 leaves each, addends ascending from 0),
+  and the blocks between consecutive addends are i16 triangle-strip index lists into section 0's stride-20 vertex array:
+  496/530 blocks stay below 149,077 with over half non-zero values, 529/530 satisfy strip vertex reuse, and repeated
+  indices inside a run are the degenerate restarts between strips. The consulted cdcEngine tr7 decompilation (GPL-3.0,
+  licence-compatible; `openanniversary-work/priorart/cdcEngine`) confirms the 20-byte `TerrainRenderVertex` field names and
+  replaces the Legend-only numbers previously carried in §5.
 
 ### Fixed
 

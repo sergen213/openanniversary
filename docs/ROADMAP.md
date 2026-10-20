@@ -16,13 +16,15 @@ acceptance evidence exists in this repository; otherwise it says what is missing
 
 ## Open technical questions (tracked here so they do not get lost)
 
-1. Geometry inside units is still a layout gap, not a container gap: an unindexed run of stride-20 records already draws
-   (`docs/formats/GEOMETRY.md` §6), but how a model's triangles index those records and where its oct-tree nodes sit is
-   unknown, as is what the type-10 payloads hold. Type 7 is characterised: shared refcounted resource records keyed by
-   section id - script/event entries with embedded paths plus float-bearing blobs - and not geometry (§7). Next step is
-   decompiling the handler objects for types 0 and 2 in `tra.exe`'s loader table `DAT_0088e2b0`. Licensing note stands:
-   Yura's `DrmFile` (GPL-3.0, version 14 only) may be consulted for structure but its code cannot be copied into this
-   GPL-3.0-or-later tree without matching terms - decide licensing before reading it in detail.
+1. Geometry inside units is now a per-content gap, not a container or layout gap. Level units are decoded end to end from
+   shipped bytes: an oct-tree of self-relative nodes in one payload, each leaf's reference relocated into one of 34 sibling
+   sections holding i16 triangle-strip runs over the stride-20 vertex array (`docs/formats/GEOMETRY.md` §9, §2). Type 7 is
+   shared refcounted resource records - script/event entries with embedded paths plus float-bearing blobs - not geometry
+   (§7), and `tra.exe`'s per-type handlers are generic resource plumbing (§5 item 1). Still open: the material/texture-page
+   selection per leaf (section 86 also relocates against a `PCD9` section), model-unit indexing for non-terrain meshes, and
+   what type-10 payloads hold. Next step is parsing the oct-tree/strips in `oa_cdc` and drawing them textured in `oa-game`.
+   Licensing note stands: consulted prior art (cdcEngine tr7, GPL-3.0) is licence-compatible with this GPL-3.0-or-later tree;
+   keep attribution if any code is taken.
 2. The five language-flavoured `specMask` groups (≈333 records each) are unconfirmed: identify by extracting one of
    each and comparing content, not by mask arithmetic.
 3. ~3,350 archive records still have no name candidate; textures (`.raw`), sound (`.mul`) and movies (`.bik`/`.sch`)

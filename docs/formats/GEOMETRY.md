@@ -80,15 +80,17 @@ references above plus the `id` field of type-5 sections), and what the 20 type-1
 
 Next evidence, in order of directness:
 
-1. Decompile the per-type handler objects reached from the loader's handler table `DAT_0088e2b0`, indexed by a
-   directory entry's type byte as `table + type*4`; registration in `FUN_005bd980` assigns one object per slot and case 5
-   of `FUN_005bca80` calls `handler + 0x10` after relocations are applied [V-exe]. Slot 7 is resolved (the shared-instance
-   cache of §7 - not geometry), so the loop that walks a vertex base with stride `0x14` has to come from the handlers for
-   types 0 and 2 (`DAT_0088e2b0`, `DAT_0088e2b8`). That gives record order, index encoding and the oct-tree walk for free.
-2. Cross-check against the community level viewer's claims — 0xB0-byte oct-tree nodes, triangle ranges per material via
-   `vbBaseOffset`/`polygonStart`/`polygonCount`, model header fields `_octTreeCount` at +0x14 and `_vertexStart` at
-   +0x44 [S]. Those numbers come from a tool for *Legend*; Anniversary's own units must reproduce them before they are
-   treated as fact, and blind fitting of those offsets over `8baf540e` produced only sliding-window artefacts [V-data].
+1. ~~Decompile the per-type handler objects reached from the loader's handler table~~ - resolved, and it was a dead end for
+   geometry: the table is `DAT_0088e2b0 + type*4`, registration happens in `FUN_005bd980` (slot 5 = `FUN_00403b30`, the
+   texture handler of §TEXTURES; slot 7 = `FUN_005bc830`, the shared-instance cache of §7) [V-exe]. The type-2 handler's
+   methods (vtable at file offset for `0x657474`, disassembled straight out of `tra.exe` around `0x5bc580`-`0x5bc660`) are
+   an acquire/release pair, one memcpy patcher that writes into a block plus an offset, and accessors over a static keyed
+   table at `0x84d41c` whose records hold a u16 field at +0 and a pointer at +4 - generic resource plumbing with no vertex
+   walking in it [V-exe]. The level layout instead came out of the payload data: see §9.
+2. ~~Cross-check against the community level viewer's claims (0xB0-byte oct-tree nodes, `vbBaseOffset`/`polygonStart`/
+   `polygonCount`, model header `_octTreeCount` at +0x14, `_vertexStart` at +0x44)~~ - those numbers are for *Legend*. The
+   Anniversary runtime decompilation now supplies the real shapes: see §8. Blind fitting of the Legend offsets over
+   `8baf540e` produced only sliding-window artefacts [V-data].
 
 Acceptance rule for any layout claim here: counts plus bounding box reproduced from a shipped unit **and** the mesh
 rendered on screen. A plausible field table is not verification — §3 is what guessing looked like.
@@ -169,3 +171,73 @@ refcounted instances, one per id - which accounts for both the fixed size per id
 
 Consequence for §5: the mesh drawn in §6 comes from a level unit's type-0 payload, so type 7 is not where model geometry
 hides. Type 10 of a level unit (20 payloads, largest 489,252 B) is still uncharacterised.
+
+## 8. cdcEngine's tr7 terrain model supplies the index encoding [S]
+
+Consulted source: `openanniversary-work/priorart/cdcEngine` - TheIndra55/cdcEngine, GPL-3.0 decompilation of the
+Anniversary runtime (its tree is rooted at `tr7`, the engine's own name for this game). It is licence-compatible with this
+GPL-3.0-or-later tree; below are struct semantics and file:line pointers, not copied code. This supersedes the
+Legend-based numbers in §5 item 2 **[S]**.
+
+- `tr7/game/terrain.h:129 TerrainRenderVertex` - four i16 position components (`x, y, z, w`), one int colour, two i16
+  texture coordinates and a u16 pair `bend`, `bendindex`: **exactly the stride-20 record of §2**, with the fourth short now
+  named `w` and the trailing four bytes accounted for.
+- `tr7/game/terrain.h:30 OctreeSphere` - bounding sphere (4 floats), a strip pointer, a child count and up to 8 child
+  pointers. The draw path recurses while the child count is non-zero and draws one strip list at each leaf
+  (`tr7/game/pc/D3D/d3dterrain.cpp:128`). A node is therefore 56 bytes of fields, not the 0xB0 that a Legend tool claims.
+- `tr7/game/terrain.h:46 TerrainTextureStripInfo` - `vertexCount`, `vmoObjectIndex`, `texScrollOffset`, `lightFlags`,
+  `stripFlags`, `matIdx`, two sort vertices, `sortPush`, a next-strip link, then `__int16 stripVertex[1]`: **the index list
+  of one triangle strip into the terrain group's shared vertex buffer**. Strips are collected per material and drawn with
+  those i16 indices plus the material's `vbBaseOffset` added to the base vertex index
+  (`d3dterrain.cpp:157-158`, `d3dterrain.cpp:244`) **[S]**.
+- `tr7/game/terrain.h:67 XboxPcMaterialStripList` - `tpageid`, flags, `vbBaseOffset`, `numStrips`, strips pointer: a
+  material names a *texture page id*, which is the material-to-texture link §5 was looking for. A terrain group holds a
+  material list (`terrain.h:77`) plus a sorted-material index array (`terrain.h:107`).
+
+Those are post-load structs whose pointers (`strips`, `nextTexture`, child arrays) must be filled in, which is what the
+dense relocation entries of §4 are for: the file form should keep the same field order and let the loader patch the
+pointers **[S → hypothesis, unverified]**. Consequence: strips and oct-tree nodes live in a level unit's *other* type-0
+sections - section 0 is entirely stride-20 vertices (§2) - so the next check is to find, among `8baf540e`'s remaining
+116 type-0 payloads, the blocks whose u16 values stay inside the 0-149,077 vertex range and whose counts match strip and
+material records.
+
+## 9. The level oct-tree and its strip indices, measured [V-data]
+
+Section 86 of unit `8baf540e` (22,288 bytes) is the terrain group's oct-tree in file form. A node is:
+
+| offset | field |
+| --- | --- |
+| +0 | four floats - bounding sphere centre and radius |
+| +16 | u32 reference, used only by leaves (branches hold 0 here) |
+| +20 | s32 child count (observed 0-8) |
+| +24 | that many u32 **self-relative byte offsets** to child nodes, in ascending order |
+
+Walking from offset 0 visits **623 nodes, 533 leaves, depth at most 6, with no anomalies**: every child offset
+stays inside the payload and points past its parent's field list. Leaves are packed at the end of the payload at stride
+32; a full eight-child branch occupies 64 bytes **[V-data]**. Reproduce:
+
+```sh
+oa-asset "<install>" drm --hash 8BAF540E --mask FFFFFFFF --section 56 --out /tmp/oct.bin   # 0x56 = 86
+oa-asset "<install>" drm --hash 8BAF540E --mask FFFFFFFF --section 56                      # same call, no --out file:
+                                                                                          # stderr lists its relocations
+```
+
+Every leaf's +16 slot is a relocation entry - **533 leaves, 533 sites** - and the references land in 34 sibling
+sections; each of those sections is referenced by exactly 16 leaves, whose addends start at 0 and ascend, so a leaf's
+block runs from its own addend to the next one **[V-data]**.
+
+Those blocks are **i16 triangle-strip index lists into section 0's stride-20 vertex array**: 496 of 530 blocks contain
+only values below 149,077 (the vertex count established in §2) with more than half non-zero, and 529 of 530 satisfy the
+strip property that every consecutive triple shares an index with its predecessor. Repeated indices inside a run mark the
+degenerate restarts between strips, e.g. `636, 636, 640, 649, 650, 649, 640, 640, 642` **[V-data]**. So §5's first open
+question - how triangles index the vertex records and where the oct-tree sits - is answered for level units; §8's
+expectation that strips sit in one particular payload is what was wrong: they are spread over many small sections and
+reached through leaf relocations.
+
+Still open: which material or texture page a leaf draws with. 622 of section 86's relocations point at section 87, whose
+payload begins `PCD9`/`DXT5` (§TEXTURES), so the oct-tree references at least one texture page directly; the per-leaf
+material fields sit in payload regions the walk does not visit. Rendering these strips with textures is the next step for
+Milestone 4.
+
+Note on `--section`: the directory prints section indices in **decimal** while `--section` parses **hexadecimal**, so
+section 86 is fetched with `--section 56`. The relocation list of a section only appears when that section is selected.

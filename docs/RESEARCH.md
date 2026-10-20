@@ -31,6 +31,7 @@ subsystem names are the vocabulary our layers must speak:
 | `tr7/cdc/runtime/cdcRender/pc/shared/{PCShaderTable,PCVertexFormat,PCTexture,PCStaticVertexBuffer,…}.h/cpp` | render resources a DRM section deserialises into; naming for vertex formats/shader tables when geometry lands in `src/render` |
 | `tr7/cdc/runtime/cdcSound/win32/deADPCM.cpp` | engine ADPCM codec — candidate decoder for sound (type 6) sections |
 | `tr7/cdc/runtime/cdcMath/*`, `cdcScene/Source/{Entity,SceneCellGroup}` | scene/entity model for Milestone 5 semantics |
+| `tr7/game/{terrain.h}`, `tr7/game/pc/D3D/d3dterrain.cpp` | the Anniversary terrain vocabulary - 20-byte `TerrainRenderVertex`, octree nodes, per-material strips drawn with i16 index lists plus a base-vertex offset; used to name and cross-check what §9 of `docs/formats/GEOMETRY.md` measured in our own bytes (clone kept at `openanniversary-work/priorart/cdcEngine`) |
 
 License handling: theirs is GPL-3.0-only, ours GPL-3.0-or-later → compatible; any copied line must be attributed and stay
 GPL. To avoid a derivative-work claim on our own code, byte-level facts keep coming from our disassembly and our data
