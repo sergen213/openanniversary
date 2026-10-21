@@ -663,10 +663,12 @@ Still open, in the order that matters:
 - **Which section is *the* terrain table.** Resolved by the census rule (`findTerrainMaterialBases`, §21): walk every
   oct-tree base-free, take the first decoded table whose length covers every `matIdx` the walked records name. It picks
   `8baf540e`'s section 141 and `4956BEA0`'s section 43 by rule, not ordering luck [V-data].
-- **What +8 and +12 mean.** Partly answered by §21: +12's low half names a texture-page (type 5) section id in 116 of
-  137 records. The +8 slots carry relocations naming their own section with addends (in this unit 12,072..21,384,
-  monotone, ~50-80 apart per record) that land in a stretch of that payload holding nothing but zeros, so they are not
-  strip-record pointers; §21's per-block statistics narrow the +12 high half to a small class enum. Both stay open [V-data].
+- **What +8 and +12 mean.** Partly answered by §21: +12 is a (class << 16 | value) pair and class 32's value names the
+  material's texture-page (type 5) section id for 160 of the 172 class-32 records across both probe units; the other
+  classes' values name ids in a namespace that is neither the unit directory nor the global object list (§21 table).
+  The +8 slots carry relocations naming their own section with addends (in this unit 12,072..21,384, monotone, ~50-80
+  apart per record) that land in a stretch of that payload holding nothing but zeros, so they are not strip-record
+  pointers [V-data]. Both stay open beyond what §21 measures.
 - **The coarse remainder.** Even with bases applied some trees keep large shares over 2,000 units (sweep maxima run from
   3.5 % to 91.8 %, e.g. `8baf540e`'s ninth tree at 91.8 %) - the sections §16 already flagged as coarse-record trees are
   not explained by bases [V-data].
@@ -683,14 +685,20 @@ Two results on the §20 table, both reproducible:
    §13's absolute reading. Implemented as `oa::cdc::findTerrainMaterialBases()`; both `oa-game --strips=true` and
    `oa-asset terrain` use it [V-data]. Reproduce: `./build/oa-asset <game-dir> terrain --hash 8BAF540E` prints
    `section 141: 92 material bases over 0 16119 32020`.
-2. **+12 low16 is the material's texture-page section id - mostly.** Over unit `4956BEA0`'s 137-record table, 116 records'
-   low 16 bits equal the `id` of a type-5 (texture) section of the same unit; 20 records name values 9,722..10,540 that
-   match no section id, and one is 0. The high 16 bits take six values - 32 x114, 38 x8, 42 x8, 36 x4, 4256 x2, 0 x1 -
-   with the non-32 values appearing inside every base block, so they are a small per-material class, not a per-block
-   stride. The misses' low halves (9,722 / 9,723 / 9,727 / 9,824 / 10,540, 37 distinct low values over the run) cluster
-   just above the type-5 id range's top (2,352), which rules out "same id space, later sections" and leaves two live
-   hypotheses: a second id namespace (global object-list ids) or a size/count field aliasing the id field in those
-   records. Distinguishing them needs one texture page actually sampled - which `matIdx` picks which `PCD9` - so it is
-   parked as Milestone 4's first experiment, not guessed at here [V-data]. Reproduce: dump the table with
-   `openanniversary-work/matrec <drm> 43` and the section directory with
-   `./build/oa-asset <game-dir> drm --hash 4956BEA0`.
+2. **+12 is a (class << 16 | value) pair; class 32's value is the material's texture-page section id.** Cross-unit
+   per-high-half census over both tables, resolving low16 against the unit's own section directory [V-data]:
+
+   | unit | high 32 -> type-5 id | high 32 unresolved | non-32 highs -> type-5 id | non-32 unresolved |
+   | --- | --- | --- | --- | --- |
+   | `4956BEA0` (137 recs) | 111 | 3 | 5 | 18 |
+   | `8BAF540E` (92 recs) | 49 | 9 | 7 | 27 |
+
+   So for the dominant class (high 32, 172 records over both units) the material's texture page is named in-file: 160 of
+   172 lows are ids of the unit's own type-5 (texture) sections, and the handful of non-32 highs that resolve also name
+   type-5 ids. The unresolved lows (9,466..10,540 plus 18,438/18,630/35,009) cluster above the type-5 id range of their
+   own unit, share values across the two units' lists, and appear in no section directory and nowhere in the extracted
+   global object list - which rules out "unit section id" and "global object-list id" for them and leaves them a
+   second namespace (cross-unit or runtime texture handles). Distinguishing that needs one texture page actually
+   sampled at draw time - which `matIdx` binds which `PCD9` - parked as Milestone 4's first experiment, not guessed
+   at here [V-data]. Reproduce: dump the table with `openanniversary-work/matrec <drm> <section>` (43 and 141) and
+   the section directory with `./build/oa-asset <game-dir> drm --hash 4956BEA0` / `... 8BAF540E`.
