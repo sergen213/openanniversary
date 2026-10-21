@@ -73,6 +73,18 @@ Measured on extracted payloads (`hash 001AA4B3`, 11,472 bytes, plus header field
 
 ## 5. What would close this
 
+Static follow-up on the §2 factory chain (Ghidra, private decompilations): `FUN_00419a80` / `FUN_00419b00` / `FUN_00419b80`
+are three one-argument variants of the same creator (`mode` 0/1/2 into `FUN_004198d0`), which builds a name from the
+format string `%s%s.mul` against prefix tables at `0x66323c`/`0x663240`, opens it through `FUN_005cefc0`, and attaches a
+0x800-byte chunk callback `FUN_00419690` (`FUN_005cf1a0(stream, 0, 0x800, cb, obj)`). So these are the `.mul` sample-bank
+streamers - naming and streaming only; no codec arithmetic appears anywhere in the creator chain. The §5 path 1 read
+("find the codec inside the soundstream class") is therefore **not** where the codec lives [V-exe]. What remains is
+§5 path 2 unchanged: capture `winmm!waveOutWrite` buffers with a dxhook-style pass-through `winmm.dll` inside the prefix,
+and diff them against record payloads. That pins the family-1 codec with certainty and simultaneously identifies which
+record carries which stream; it is the next audio experiment, and until it lands no audio decoder goes into `src/cdc`.
+
+### 5.1 Original §5 text
+
 Statistics have been exhausted; two concrete evidence paths remain, in order of cost:
 
 1. Read the soundstream class produced by `FUN_00419a80` (its vtable and fill routine) to see which codec converts payload

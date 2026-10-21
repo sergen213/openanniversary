@@ -621,8 +621,9 @@ of **stride 20** whose first word is the base, and reading them fixes the geomet
 
 Unit `4956BEA0` (the entrance hall §17 item 4 measured from inside the running game) holds such a section at index **43**:
 a run of **137** records starting at payload offset 9,340, each record holding base u32 (+0), zero (+4), a slot that a
-kind-0 relocation patches and that names this same section (+8), one packed word whose low half runs over values like
-1,532/2,351 while its high half is 32 in every shipped record of the run (+12), then zero (+16). The base values along
+kind-0 relocation patches and that names this same section (+8), one packed word whose low half matches a texture-page
+section id in 116 of the 137 records (§21; its high half is 32 in 114 of them but also 0/36/38/42/4256 - the earlier
+"32 in every record" was a sampling artifact), then zero (+16). The base values along
 the run are `{0 x25, 16097 x31, 32447 x29, 48540 x28, 64754 x24}` - the same five numbers §17 item 4 measured arriving at
 `DrawIndexedPrimitive`, now read out of the archive [V-data].
 
@@ -659,12 +660,37 @@ array - and today's rule simply takes the first section that passes, which lands
 
 Still open, in the order that matters:
 
-- **Which section is *the* terrain table.** Selecting among same-shaped runs needs a rule from the shipped data -
-  probably binding tables to trees through the oct-tree or its draw records - not first-match. Until then
-  `unknownMaterials` and `badHeads` are the tell, per unit [S].
-- **What +8 and +12 mean.** The +8 slots carry relocations naming their own section with addends (in this unit
-  12,072..21,384) that land in a stretch of that payload holding nothing but zeros, so they are not strip-record pointers;
-  the packed word at +12 is unexplained beyond its measured shape [V-data].
+- **Which section is *the* terrain table.** Resolved by the census rule (`findTerrainMaterialBases`, §21): walk every
+  oct-tree base-free, take the first decoded table whose length covers every `matIdx` the walked records name. It picks
+  `8baf540e`'s section 141 and `4956BEA0`'s section 43 by rule, not ordering luck [V-data].
+- **What +8 and +12 mean.** Partly answered by §21: +12's low half names a texture-page (type 5) section id in 116 of
+  137 records. The +8 slots carry relocations naming their own section with addends (in this unit 12,072..21,384,
+  monotone, ~50-80 apart per record) that land in a stretch of that payload holding nothing but zeros, so they are not
+  strip-record pointers; §21's per-block statistics narrow the +12 high half to a small class enum. Both stay open [V-data].
 - **The coarse remainder.** Even with bases applied some trees keep large shares over 2,000 units (sweep maxima run from
   3.5 % to 91.8 %, e.g. `8baf540e`'s ninth tree at 91.8 %) - the sections §16 already flagged as coarse-record trees are
   not explained by bases [V-data].
+
+## 21. The census rule picks the table, and the material record's +12 low half names its texture page, measured [V-data]
+
+Two results on the §20 table, both reproducible:
+
+1. **Table selection by material census.** Walk every oct-tree of the unit once with no table (§15's base-free walk),
+   collect the set of `matIdx` values (strip header +20) the reached records name, and take the first section whose
+   decoded run is longer than every named `matIdx`. §20 flagged same-shaped runs serving per-object model arrays
+   (`8baf540e` sections 153/160/188/191/206); none of them covers its unit's census, so the rule lands on section 141
+   there and section 43 in `4956BEA0` without ordering luck. A unit where no run covers the census refuses and keeps
+   §13's absolute reading. Implemented as `oa::cdc::findTerrainMaterialBases()`; both `oa-game --strips=true` and
+   `oa-asset terrain` use it [V-data]. Reproduce: `./build/oa-asset <game-dir> terrain --hash 8BAF540E` prints
+   `section 141: 92 material bases over 0 16119 32020`.
+2. **+12 low16 is the material's texture-page section id - mostly.** Over unit `4956BEA0`'s 137-record table, 116 records'
+   low 16 bits equal the `id` of a type-5 (texture) section of the same unit; 20 records name values 9,722..10,540 that
+   match no section id, and one is 0. The high 16 bits take six values - 32 x114, 38 x8, 42 x8, 36 x4, 4256 x2, 0 x1 -
+   with the non-32 values appearing inside every base block, so they are a small per-material class, not a per-block
+   stride. The misses' low halves (9,722 / 9,723 / 9,727 / 9,824 / 10,540, 37 distinct low values over the run) cluster
+   just above the type-5 id range's top (2,352), which rules out "same id space, later sections" and leaves two live
+   hypotheses: a second id namespace (global object-list ids) or a size/count field aliasing the id field in those
+   records. Distinguishing them needs one texture page actually sampled - which `matIdx` picks which `PCD9` - so it is
+   parked as Milestone 4's first experiment, not guessed at here [V-data]. Reproduce: dump the table with
+   `openanniversary-work/matrec <drm> 43` and the section directory with
+   `./build/oa-asset <game-dir> drm --hash 4956BEA0`.
