@@ -74,10 +74,28 @@ Two runtime-evidence routes were tried and both need more work than they look:
   `renderdoccmd capture -w … wine ./tra.exe` - the Linux build does not inject into Wine guest processes. Capturing D3D
   traffic needs a Windows RenderDoc inside the prefix, or DXVK-side hooks.
 - **Address-space reading:** `/proc/<pid>/mem` returns `EACCES`. Kernel Yama is at `ptrace_scope = 1`, and Wine's PE
-  processes are children of `wineserver` (measured: `tra.exe` PID 1458690, PPID 1457), so no process we start - including one
-  that launched Wine itself - is an ancestor of the guest. Reading memory therefore goes through Wine's own debugger: run the
-  game under `winedbg`, stop it at a known address (`FUN_00455890` chapter start, or the unit loader `FUN_005bca80`, see
-  `docs/RESEARCH.md` §5.1) and use its `memsave` command to pull regions out for offline parsing by `oa_cdc`.
+  processes are children of `wineserver`; even a wineserver we start ourselves leaves the guest reparented to
+  `systemd --user`, so no process we start ends up an ancestor of it. Wine's debugger cannot stand in either: this Wine
+  (11.20) has **no `memsave` command**, that string appears in none of its binaries, and the earlier note pointing at it
+  was never verified [V-data].
+
+What works instead is standing inside the guest with a d3d9 shim - `tools/dxhook/`:
+
+```sh
+cd tools/dxhook && ./build.sh                      # needs i686-w64-mingw32-gcc (pacman -S mingw-w64-gcc)
+WINEPREFIX=$PWD/../../openanniversary-work/wine-tra ./install.sh install   # DXVK moves to d3d9_dxvk.dll
+cd ../../openanniversary-work/wine-drive/trawork
+WINEDLLOVERRIDES="d3d9=n,b" DISPLAY=:0 WINEPREFIX=.../wine-tra wine ./tra.exe   # override REQUIRED: Wine treats
+                                                                                # d3d9 as a builtin, and without it the
+                                                                                # shim is never loaded (no log appears)
+python3 ../../../../openanniversary/tools/dxhook/report.py .../wine-tra/drive_c/tra/d3d9log
+./install.sh uninstall                             # put DXVK back afterwards
+```
+
+Measured [V-data]: `/proc/<pid>/maps` shows the chain `trawork/d3d9.dll` (the install's own vendor shim, left untouched)
+`wine-tra/drive_c/tra/d3d9log`, and one four-minute session at menu plus entrance hall produced 17.9 M draw lines and
+1.1 GB of text - stop the game once the level is loaded. Buffer contents only appear as `vb_*.bin`/`ib_*.bin` when a
+resource can actually be locked, which default-pool terrain buffers cannot: that capture logged zero dump files.
 
 ## Display and visual verification
 

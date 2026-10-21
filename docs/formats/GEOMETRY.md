@@ -493,12 +493,27 @@ the shipped data does not give us.
    base(material) = `S + sum of the strip vertex counts of lower-numbered materials`. Scanning all `S`: best medians stay 8-30
    units for trees 131/140/165/190/197/200, and the implied spans overlap between trees (tree 131 needs span 17,571 from
    S=16,923 while tree 140 needs 22,614 from S=17,178) - one array cannot hold both [V-data]. The model is wrong as stated.
+4. **Base vertex indices exist per material at draw time, measured from inside the game's own process.** A d3d9
+   passthrough shim standing in front of DXVK (`tools/dxhook`, setup in `docs/ENVIRONMENT.md`) logged every
+   `DrawIndexedPrimitive` made while Lara stood in Croft Manor's entrance hall: 17,882,068 draw calls, 17,410,195 of
+   them with at least 16 triangles, spread over ten distinct (vertex object, index object) pairs. Four of the ten ever
+   use a non-zero base: the pair reached through stream offset 20 - vertex object `0x11fb92b8` with index objects
+   `0x11fb8cb8`, `0x11fb8c38` and `0x11fb8d38` - is drawn with bases {0, 16097, 32447, 48540, 64754} across 10.0 M
+   draws reaching at most vertex 72,832, while every pair reached through offset 24 is drawn with base 0 only and never
+   passes vertex 21,845 [V-data]. The gaps between consecutive bases - 16,350 / 16,093 / 16,214 / 16,214 - are uneven,
+   so each one marks where a material's vertex block ends and the next begins: that is prior art's
+   `XboxPcMaterialStripList.vbBaseOffset` (`tr7/game/terrain.h:71`) arriving at `DrawIndexedPrimitive`, exactly as
+   `tr7/game/pc/D3D/d3dterrain.cpp:244` draws with it. Item 1 still holds - the unit stores no such number - but their
+   existence per draw is now measured rather than inferred, and what stays unknown is the ordering rule: which
+   material's block starts at each base. Buffer bytes could not be captured to fit that rule in this run, because
+   `GetDesc`/`Lock` on those objects never succeeded (zero dump files): they are default-pool resources uploaded once,
+   with no CPU copy kept afterwards.
 
-So the decoder keeps what it has: indices are absolute into section 0, which reads coherently for the fine trees and badly for
-the coarse ones, and `--avatar=true` stays a Warn-level probe rather than ground truth. What would close this is not more
-statistics but the one thing these measurements cannot produce - the code in `tra.exe` that builds a terrain group's vertex
-buffer as its unit loads, turning data we already parse into per-material bases. That is where Milestone 4's geometry work goes
-next [S].
+So the decoder keeps what it has: indices are absolute into section 0, which reads coherently for the fine trees
+and badly for the coarse ones, and `--avatar=true` stays a Warn-level probe rather than ground truth. Item 4 above
+narrows the remaining work considerably - the bases exist at draw time and their sizes match per-material vertex
+blocks, so what has to come out of `tra.exe`, or out of a capture of the uploads that build those blocks, is the
+*ordering rule*: which material's block begins at each base. That is where Milestone 4's geometry work goes next [S].
 
 Three cheaper ways of reaching that code were tried and came up empty, so they are recorded here to stop repeats [V-data]:
 
@@ -523,11 +538,15 @@ shows Lara standing in Croft Manor's entrance hall, screenshot verified [V-data]
 memory question rather than a disassembly one - locate the loaded level payloads and any vertex buffer the engine built from
 them, and diff those bytes against the archive's. If index words were rewritten on load, the diff shows it; if not, a base
 value sits in some structure beside the oct-tree or its draw record. Direct `/proc/<pid>/mem` reads do not work: Yama is at
-`ptrace_scope = 1` and Wine parents guest processes under `wineserver`, so no process we start is an ancestor of the guest,
-and the read returns `EACCES` [V-data]. The working route is Wine's own debugger - run the game under `winedbg`, stop it at
-`FUN_00455890` (chapter start) or the unit loader `FUN_005bca80`, and `memsave` regions out for `oa_cdc` to parse. A GPU
-capture would answer the same question at the API level, but RenderDoc's Linux build injects nothing into Wine guests and
-produced no file [V-data].
+`ptrace_scope = 1`, and Wine parents guest processes under `wineserver` - even a wineserver we start ourselves leaves the
+guest reparented to `systemd --user`, so no process we start ends up an ancestor of it, and the read returns `EACCES`
+[V-data]. Wine's own debugger is not a way out either: this Wine (11.20) has **no `memsave` command at all**, that string
+appears in none of its binaries, so the earlier pointer to it was never verified [V-data]. What does work is a small d3d9
+passthrough DLL loaded inside the guest itself (`tools/dxhook/`): it takes DXVK's place as `syswow64/d3d9.dll`, keeps DXVK
+reachable as `d3d9_dxvk.dll`, and rewrites the created device's vtable slots, which makes draw parameters and buffer
+pointers readable from inside the process with no ptrace at all - that is how item 4 above was measured. A GPU capture would
+answer the same question at the API level, but RenderDoc's Linux build injects nothing into Wine guests and produced no file
+[V-data].
 
 ## 18. An edge-length gate removes the gross chains and still certifies nothing, measured [V-data] [V-gpu]
 

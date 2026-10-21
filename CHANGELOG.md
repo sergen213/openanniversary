@@ -112,7 +112,24 @@ zero version and has no releases yet.
   64 samples out), plus the encodings ruled out by measurement and the two evidence paths that would settle it. No decoder ships
   while the payload encoding is unresolved.
 
+- `tools/dxhook/`: a d3d9 passthrough shim (`shim.c`, `build.sh`, `install.sh install|uninstall`) that takes DXVK's
+  place as the prefix's `syswow64/d3d9.dll`, keeps DXVK reachable as `d3d9_dxvk.dll`, and rewrites the created device's
+  vtable slots from inside the guest, so draw parameters and buffer pointers can be read with no ptrace at all.
+  `report.py` summarises a capture while streaming, because a four-minute session writes over a gigabyte of text. The
+  measured setup - including that `WINEDLLOVERRIDES="d3d9=n,b"` is required since Wine treats `d3d9` as a builtin - is in
+  `docs/ENVIRONMENT.md`; captures and the DXVK backup stay outside the repository.
+
 ### Verified
+- Per-material base vertex indices exist at draw time, measured inside the shipped process
+  (`docs/formats/GEOMETRY.md` §17 item 4). One capture of Croft Manor's entrance hall with `tools/dxhook` logged
+  17,882,068 `DrawIndexedPrimitive` calls; the buffer pair reached through stream offset 20 is drawn with bases
+  {0, 16097, 32447, 48540, 64754} across 10.0 M draws reaching vertex 72,832, while every pair reached through offset 24
+  is drawn with base 0 only (maximum reach 21,845). The gaps - 16,350 / 16,093 / 16,214 / 16,214 - are uneven, so each
+  marks the end of one material's vertex block; prior art draws with exactly such a value
+  (`tr7/game/pc/D3D/d3dterrain.cpp:244`). The unit still stores none of these numbers, and which material's block starts
+  at each base stays unresolved. Also measured while getting there: Wine 11.20 ships no `memsave` command in any binary,
+  so the documented route through it could not have worked, and default-pool terrain buffers refuse `Lock`, so buffer
+  bytes need a different capture (zero dump files from this one).
 - Container unit tests (through CTest; the suite is 53 cases today, these among them): golden path hashes taken from the
   shipped archive (`pc-w\generalbank.drm` → `0xB3AAAFD6`, `pc-w\lara.drm` → `0x5FF91900`), synthetic stored/zlib/
   raw-deflate records, part-boundary straddling, specialisation-mask selection, unsorted-index rejection, strict typed
