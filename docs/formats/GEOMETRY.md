@@ -704,3 +704,16 @@ Two results on the §20 table, both reproducible:
    4956BEA0 --section 1` decodes a 1024x1024 DXT1 chain with 11 mips, sections 2/3 512x512 with 10 [V-data].
    Reproduce: dump the table with `openanniversary-work/matrec <drm> <section>` (43 and 141) and
    the section directory with `./build/oa-asset <game-dir> drm --hash 4956BEA0` / `... 8BAF540E`.
+
+## 22. With bases applied, the entrance hall covers ground a foot stands on: 715 of 2,304 columns, measured [V-data]
+
+§19's census over `8baf540e` under base 0 found support in 106 of 2,304 sampled columns. The same headless census over
+the unit §20/§21 actually decode - `4956BEA0`, its section-43 table applied through §21's census rule - stands on
+**715 of 2,304 columns (31 %)** across a 26,782 x 12,936-unit footprint, drawing 52,613 of 53,154 chained triangles
+with only 541 gated by §18's edge rule (vs §18's 16,462-of-135,914 when bases were missing), and a body walking the
+fixed script from the densest 8/8 spot keeps ground through consecutive ticks (`--mesh=4956BEA0 --strips=true
+--avatar=true --selfCheck=true --frames=1`, 2026-10-21) [V-data]. The gate's remaining refusals and the 46 broken links
+are §21's unresolved classes, not the base question; `y` still spans -17,656..17,731 because multi-storey level volume
+is in one vertex array, which the oct-tree (not the grid) is expected to separate. This is §20's claim demonstrated on
+feet rather than on edges: the bases produce continuous, walkable ground in the unit whose draw-time numbers they were
+read from. The coarse-tree remainder of `8baf540e` (§20 open item 3) stays open and is the next geometry question.
