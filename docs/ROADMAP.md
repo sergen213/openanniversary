@@ -16,28 +16,22 @@ acceptance evidence exists in this repository; otherwise it says what is missing
 
 ## Open technical questions (tracked here so they do not get lost)
 
-1. Geometry inside units is now a per-content gap, not a container or layout gap. The level oct-tree and the strip chains it
-   reaches are both decoded from shipped bytes: self-relative nodes in one payload, each leaf's +16 slot relocated into a
-   sibling section, every one of unit `8baf540e`'s 1,620 leaf references landing on a `TerrainTextureStripInfo` header once
-   the off-by-one in relocation section numbering is corrected (`docs/formats/GEOMETRY.md` §15), and chains followed through
-   `nextTexture` - a slot the archive patches like any other pointer, four bytes short of its record about half the time
-   (§16). Still open: whether strip indices carry a per-material base inside the contiguous front of section 0 they reach
-   (prior art's `XboxPcMaterialStripList.vbBaseOffset`; §16 measured 75 headers whose index runs name vertices outside the
-   array, which such a base would also explain), why two trees' records are coarse throughout (medians 9,926 and 6,934 world
-   units of edge length) while the other seven sit at 63-206, what the other payload kinds are, per-leaf material/texture-page
-   selection (section 86 also relocates against a `PCD9` section), and model-unit indexing for non-terrain meshes. Reading the
-   load path statically is capped by §17's base-relative references, so the next step is runtime: the shipped game boots into
-   Croft Manor under Wine plus DXVK (`docs/ENVIRONMENT.md`), and its memory comes out through `winedbg` - stop at
-   `FUN_00455890` (chapter start) or the unit loader `FUN_005bca80` and `memsave` regions, since Yama's `ptrace_scope = 1`
-   blocks direct `/proc/<pid>/mem` reads of Wine guests. Diff those bytes against the archive's to see whether index words are
-   rewritten as a unit loads and where a base value lives;
-   `oa_cdc`'s tree-and-chain walk plus `oa-asset terrain` remain the file-side reference, and the per-type handler table
-   (`DAT_0088e2b0 + type*4`, §5/§7) is the fallback if memory reading proves ambiguous.
-   Licensing note stands: consulted prior art (cdcEngine tr7, GPL-3.0) is licence-compatible with this GPL-3.0-or-later tree;
-   keep attribution if any code is taken.
+1. Terrain geometry is decoded through the walkable-ground stage: bases are read from the unit (`docs/formats/GEOMETRY.md`
+   §20), the census rule picks the table by rule (§21), the entrance hall supports 715 of 2,304 foot columns with bases
+   applied (§22), and the material table's +12 class-32 names the texture-page section id for 160 of its 172 class-32
+   records (§21). Open, in priority order: (a) bind one page at draw time - render a `4956BEA0` material with the type-5
+   page its +12 names, which is Milestone 4's first experiment; (b) the +12 classes other than 32 and their unresolved
+   values 9,466..10,540/18,438/18,630/35,009 - no unit directory, no object-list, so a second namespace, settled by the
+   same draw-time binding as (a); (c) the coarse remainder of `8baf540e` - two trees stay at median edges 9,926/6,934
+   even with bases (§20 open item 3); (d) what the +8 relocated slots point at (they land in a zero-filled stretch of
+   their own section, monotone ~50-80 apart); (e) other payload kinds and model-unit indexing for non-terrain meshes;
+   (f) the multi-storey y spread §22 notes, expected to separate through oct-tree descent rather than the flat grid.
+   Licensing note stands: consulted prior art (cdcEngine tr7, GPL-3.0) is licence-compatible with this GPL-3.0-or-later
+   tree; keep attribution if any code is taken.
 2. The five language-flavoured `specMask` groups (≈333 records each) are unconfirmed: identify by extracting one of
    each and comparing content, not by mask arithmetic.
-3. ~3,350 archive records still have no name candidate; textures (`.raw`), sound (`.mul`) and movies (`.bik`/`.sch`)
-   need path templates recovered from `tra.exe` string xrefs.
+3. ~3,350 archive records still have no name candidate; the sound-bank path template is recovered (`%s%s.mul` over the
+   prefix table at `0x66508c`, `docs/formats/AUDIO.md` §2/§5) and covers the `.mul` family's naming, but textures (`.raw`)
+   and movies (`.bik`/`.sch`) still need path templates recovered from `tra.exe` string xrefs.
 4. Licensing: this tree is GPL-3.0-or-later to stay compatible with the sister projects; revisit before any code is
    taken from another project's tree.
