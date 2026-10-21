@@ -700,5 +700,7 @@ Two results on the §20 table, both reproducible:
    global object list - which rules out "unit section id" and "global object-list id" for them and leaves them a
    second namespace (cross-unit or runtime texture handles). Distinguishing that needs one texture page actually
    sampled at draw time - which `matIdx` binds which `PCD9` - parked as Milestone 4's first experiment, not guessed
-   at here [V-data]. Reproduce: dump the table with `openanniversary-work/matrec <drm> <section>` (43 and 141) and
+   at here [V-data]. And the pages the class-32 values name are real textures end to end: `oa-asset texture --hash
+   4956BEA0 --section 1` decodes a 1024x1024 DXT1 chain with 11 mips, sections 2/3 512x512 with 10 [V-data].
+   Reproduce: dump the table with `openanniversary-work/matrec <drm> <section>` (43 and 141) and
    the section directory with `./build/oa-asset <game-dir> drm --hash 4956BEA0` / `... 8BAF540E`.
