@@ -5,6 +5,7 @@
 #include "cdc/Drm.hpp"
 #include "cdc/Geometry.hpp"
 #include "cdc/TerrainQuery.hpp"
+#include "game/Avatar.hpp"
 #include "cdc/Texture.hpp"
 #include "core/Config.hpp"
 #include "core/Log.hpp"
@@ -221,6 +222,26 @@ int main(int argc, char** argv) {
     oa::render::MeshCamera camera;
     float panTarget[3] = {0.0f, 0.0f, 0.0f};
     float camStep = 1.0f;
+    // --avatarDrive=true hands the body to the keyboard in the frame loop. These live outside the --mesh block for the
+    // same reason the camera does, and driveTerrain is moved out of the scripted run below once that has reported.
+    oa::cdc::TerrainQuery driveTerrain;
+    oa::game::AvatarState driven;
+    bool driveAvatar = false;
+    const oa::game::AvatarTuning driveTuning;   // the same defaults the scripted run reports
+    bool drivenAlive = true;
+    std::uint64_t driveTicks = 0u;   // physics ticks since the keyboard took over, for the periodic report
+    // Wall-clock pacing for the drive loop: the swapchain is uncapped, so one tick per presented frame would move the
+    // body faster than the tuning says it should. The clock starts here; the gap covering container loading and upload is
+    // dropped by the quarter-second cap below rather than run as catch-up ticks.
+    std::chrono::steady_clock::time_point driveLast = std::chrono::steady_clock::now();
+    double driveAccum = 0.0;
+    // The mesh's framing centre, filled when the body is handed to the keyboard. camera.pan* is an offset from that
+    // centre (VkRenderer.cpp builds the look-at as meshCentre + pan), so following a body needs the subtraction.
+    float viewCentre[3] = {0.0f, 0.0f, 0.0f};
+    // --avatarFollow=true asks for the look-at to sit on the body; the pan itself can only be applied once the framing
+    // centre exists, so this records the world point and lets the framing code below do the subtraction.
+    bool followBody = false;
+    float followAt[3] = {0.0f, 0.0f, 0.0f};
 
     const std::string meshPath = config.str("mesh");
     if (!meshPath.empty()) {
@@ -338,7 +359,7 @@ int main(int argc, char** argv) {
                     heads += walked.heads;
                     badHeads += walked.badHeads;
                     brokenLinks += walked.brokenLinks;
-                    // Gate what goes to the screen, not what --walk reads. GEOMETRY.md §16-§17 measure that edge length is
+                    // Gate what goes to the screen, which is also what a foot probes through the terrain grid (§19). §16-§17 measure that edge length is
                     // bimodal per record under base 0: most chains sit at 63-206 world units while whole records land at
                     // ~7k-10k because their indices name a region of section 0 no base has been established for (§18). The
                     // same rule GEOMETRY.md §17 uses to score a vertex base - non-degenerate, longest edge under 1,000 units -
@@ -365,18 +386,24 @@ int main(int argc, char** argv) {
                    vertices.size(), coarseTriangles, badHeads, brokenLinks);
         }
 
-        // --walk=true sends a point agent over the decoded strip geometry before any frame is drawn: gravity pulls it down,
-        // the query answers with the highest surface under its foot, and the run logs where it stood. Speed and gravity are
-        // placeholders - Milestone 5 replaces them with Lara's values from tra.exe. The heights are only as good as the
-        // strip topology behind them, which is not settled: GEOMETRY.md §16 measures what walking over it exposes.
-        if (config.flag("walk", false)) {
-            if (stripIndices.empty()) {
-                OA_LOG(oa::LogLevel::Error, "app", "--walk needs --strips=true: walking reads the strip index lists");
+        // --avatar=true answers for the foot with a column query over the strip records that survived the gate. The older
+        // `--walk=true` probe is gone: it walked a fixed straight line from the mesh centre, which on the gated set starts
+        // over a hole and exits with an error (§19), and --avatar=true measures the same query with support counts, a jump
+        // and level-change accounting. GEOMETRY.md §16 measured that some chains land far away because no vertex base has
+        // been established for them, which is why the app keeps saying these heights measure the decode rather than shipped
+        // ground.
+        const bool wantAvatar = config.flag("avatar", false);
+        oa::cdc::TerrainQuery terrain;
+        if (wantAvatar) {
+            if (drawIndices.empty()) {
+                OA_LOG(oa::LogLevel::Error, "app", "--avatar needs --strips=true: it reads the strip index lists");
                 return 2;
             }
-            oa::cdc::TerrainQuery terrain;
             std::string queryError;
-            if (!terrain.build(vertices, stripIndices, {}, &queryError)) {
+            // The grid is built over what actually gets drawn, not every chained triangle: §18 measured that the ungated
+            // list carries triangles tens of thousands of units across, and a column query answers with the highest one,
+            // so an agent would walk on those slivers instead of the floor.
+            if (!terrain.build(vertices, drawIndices, {}, &queryError)) {
                 OA_LOG(oa::LogLevel::Error, "app", "cannot build the terrain query: {}", queryError);
                 return 2;
             }
@@ -385,67 +412,274 @@ int main(int argc, char** argv) {
                    terrain.boundsMin()[1], terrain.boundsMax()[1]);
             OA_LOG(oa::LogLevel::Warn, "app", "the surface under foot comes from strip index lists whose vertex base is not "
                                               "established (GEOMETRY.md §16): these heights measure the decode, not shipped ground");
+        }
 
-            constexpr float kStep = 1.0f / 60.0f;    // fixed timestep, so the run repeats exactly
-            constexpr std::uint32_t kTicks = 900u;   // fifteen seconds
-            constexpr float kSpeed = 400.0f;         // world units per second along +x
-            constexpr float kGravity = -2000.0f;     // world units per second squared
-            constexpr float kStepUp = 12.0f;         // a foot may climb this far without being blocked
+        // --avatar=true drives the movement core over shipped geometry with a fixed script - walk one way, take one jump,
+        // keep walking - so the run repeats exactly and reports what gravity, ground contact and step-up did against this
+        // level's own triangles (docs/ROADMAP.md Milestone 5). --avatarDrive=true then hands that same body to the keyboard;
+        // nothing here claims the tuning numbers are the shipped ones (see src/game/Avatar.hpp).
+        if (wantAvatar) {
+            const oa::game::AvatarTuning tuning;   // defaults, logged below so a run can be reproduced from the log alone
+            constexpr float kStep = 1.0f / 60.0f;
+            const std::uint32_t ticks = static_cast<std::uint32_t>(std::max(1, config.integer("avatarTicks", 300)));
+            const float yaw = config.str("avatarYaw").empty() ? 1.5707963267948966f
+                                                              : std::strtof(config.str("avatarYaw").c_str(), nullptr);
 
-            const float midX = (terrain.boundsMin()[0] + terrain.boundsMax()[0]) * 0.5f;
-            const float midZ = (terrain.boundsMin()[2] + terrain.boundsMax()[2]) * 0.5f;
-            float x = midX;
-            float z = midZ;
-            float y = terrain.boundsMax()[1] + 50.0f;   // start above everything and fall onto the level
-            float vy = 0.0f;
-            std::uint32_t groundedTicks = 0;
-            std::uint32_t blocked = 0;
-            bool fellOut = false;
-            oa::cdc::TerrainHit lastHit;
-            bool haveLastHit = false;
-            std::uint32_t tick = 0;
-            for (; tick < kTicks; ++tick) {
-                vy += kGravity * kStep;
-                float nextY = y + vy * kStep;
-                oa::cdc::TerrainHit hit;
-                const bool support = terrain.surfaceAt(x, z, nextY, kStepUp, &hit);
-                if (support) { lastHit = hit; haveLastHit = true; }
-                if (support && vy <= 0.0f && nextY <= hit.y + kStepUp) {
-                    nextY = hit.y;   // resting on the surface
-                    vy = 0.0f;
-                    groundedTicks += 1u;
-                }
-                y = nextY;
-                if (y < terrain.boundsMin()[1] - 200.0f) {
-                    fellOut = true;
-                    OA_LOG(oa::LogLevel::Error, "app", "walk tick {}: agent fell through the floor at ({:.0f}, {:.0f})", tick, x, z);
-                    break;
-                }
-                if (x + kSpeed * kStep <= terrain.boundsMax()[0]) {
-                    x += kSpeed * kStep;
-                } else {
-                    blocked += 1u;   // the mesh ends: standing still for the rest of the run
-                }
-                if (tick % 150u == 0u || tick + 1u == kTicks) {
-                    if (support) {
-                        OA_LOG(oa::LogLevel::Info, "app", "walk tick {}: agent ({:.1f}, {:.1f}, {:.1f}) ground {:.1f} "
-                                                         "(triangle {})", tick, x, y, z, hit.y, hit.triangle);
-                    } else {
-                        OA_LOG(oa::LogLevel::Info, "app", "walk tick {}: agent ({:.1f}, {:.1f}, {:.1f}) ground none",
-                               tick, x, y, z);
+            // Spawn where the decode is actually walkable: score each sampled column by how many of its eight neighbours
+            // one cell away are supported too, and take the densest. §15-§16 measured that these chains address only a
+            // compact block of the vertex array (16,338 of 149,077 vertices here), so coverage - not the physics - is what
+            // limits where an agent can stand; the census prints that instead of hiding it.
+            oa::cdc::TerrainHit spawn{};
+            float spawnX = 0.0f, spawnZ = 0.0f;
+            int bestScore = -1;
+            bool foundSpawn = false;
+            constexpr std::uint32_t kSamples = 48u;
+            const float cell = terrain.cellSize();
+            std::uint32_t probes = 0u, supportedProbes = 0u;
+            for (std::uint32_t iz = 0u; iz < kSamples; ++iz) {
+                for (std::uint32_t ix = 0u; ix < kSamples; ++ix) {
+                    const float sx = terrain.boundsMin()[0] +
+                                     (terrain.boundsMax()[0] - terrain.boundsMin()[0]) * (static_cast<float>(ix) + 0.5f) / static_cast<float>(kSamples);
+                    const float sz = terrain.boundsMin()[2] +
+                                     (terrain.boundsMax()[2] - terrain.boundsMin()[2]) * (static_cast<float>(iz) + 0.5f) / static_cast<float>(kSamples);
+                    oa::cdc::TerrainHit here{};
+                    ++probes;
+                    if (!terrain.surfaceAt(sx, sz, terrain.boundsMax()[1], 4.0f * cell, &here)) continue;
+                    ++supportedProbes;
+                    int score = 0;
+                    for (int dz = -1; dz <= 1; ++dz) {
+                        for (int dx = -1; dx <= 1; ++dx) {
+                            if (dx == 0 && dz == 0) continue;
+                            oa::cdc::TerrainHit neighbour{};
+                            if (terrain.surfaceAt(sx + static_cast<float>(dx) * cell, sz + static_cast<float>(dz) * cell,
+                                                  here.y + cell, 4.0f * cell, &neighbour)) {
+                                ++score;
+                            }
+                        }
+                    }
+                    if (!foundSpawn || score > bestScore) {
+                        foundSpawn = true;
+                        bestScore = score;
+                        spawn = here;
+                        spawnX = sx;
+                        spawnZ = sz;
                     }
                 }
             }
-            OA_LOG(oa::LogLevel::Info, "app", "walk finished: {} of {} tick(s) supported, {} blocked at the edge, final "
-                                              "({:.1f}, {:.1f}, {:.1f})", groundedTicks, tick, blocked, x, y, z);
-            if (haveLastHit) {
-                float corners[9];
-                terrain.triangleCorners(lastHit.triangle, corners);
-                OA_LOG(oa::LogLevel::Info, "app", "settled on triangle {}: ({:.0f}, {:.0f}, {:.0f}) ({:.0f}, {:.0f}, {:.0f}) "
-                                                 "({:.0f}, {:.0f}, {:.0f})", lastHit.triangle, corners[0], corners[1], corners[2],
-                       corners[3], corners[4], corners[5], corners[6], corners[7], corners[8]);
+            OA_LOG(oa::LogLevel::Info, "app", "avatar census: {} of {} sampled column(s) supported across {:.0f}x{:.0f} "
+                                              "units; densest spot scores {}/8 at ({:.1f}, {:.1f}) ground {:.1f}",
+                   supportedProbes, probes, terrain.boundsMax()[0] - terrain.boundsMin()[0],
+                   terrain.boundsMax()[2] - terrain.boundsMin()[2], bestScore, spawnX, spawnZ, spawn.y);
+            if (!foundSpawn) {
+                OA_LOG(oa::LogLevel::Error, "app", "no supported column anywhere in the gated terrain: cannot place an avatar");
+                return 2;
             }
-            if (fellOut) return 2;
+            oa::game::AvatarState avatar;
+            if (!oa::game::placeOnGround(&avatar, spawnX, spawnZ, spawn.y + 10.0f, 30.0f, 40.0f, terrain)) {
+                OA_LOG(oa::LogLevel::Error, "app", "avatar could not be placed at ({:.1f}, {:.1f})", spawnX, spawnZ);
+                return 2;
+            }
+
+            std::uint32_t supported = 0u, airborne = 0u, jumps = 0u, levelChanges = 0u;
+            float apex = avatar.y, travelled = 0.0f, previousGroundY = avatar.groundY;
+            bool alive = true;
+            std::uint32_t tick = 0u;
+            for (; tick < ticks && alive; ++tick) {
+                oa::game::AvatarInput input;
+                input.forward = 1.0f;
+                input.run = config.flag("avatarRun", false);
+                input.jump = (tick == ticks / 3u && avatar.grounded);   // one take-off per run, at a fixed tick
+                jumps += input.jump ? 1u : 0u;
+                const float beforeX = avatar.x, beforeZ = avatar.z;
+                alive = oa::game::advance(&avatar, input, yaw, kStep, terrain, tuning);
+                travelled += std::abs(avatar.x - beforeX) + std::abs(avatar.z - beforeZ);
+                supported += avatar.grounded ? 1u : 0u;
+                airborne += avatar.grounded ? 0u : 1u;
+                apex = std::max(apex, avatar.y);
+                if (avatar.grounded && std::abs(avatar.groundY - previousGroundY) > 1.0f) {
+                    ++levelChanges;
+                    previousGroundY = avatar.groundY;
+                }
+                if (tick % 60u == 0u || tick + 1u == ticks) {
+                    OA_LOG(oa::LogLevel::Info, "app", "avatar tick {}: ({:.1f}, {:.1f}, {:.1f}) {} ground {:.1f} triangle {}",
+                           tick, avatar.x, avatar.y, avatar.z, avatar.grounded ? "on" : "in the air off", avatar.groundY,
+                           avatar.groundTriangle);
+                }
+            }
+            OA_LOG(oa::LogLevel::Info, "app", "avatar run over '{}': tuning walk {:.0f} run {:.0f} gravity {:.0f} jump "
+                                              "{:.0f} step {:.0f}; {} tick(s) ran, {} supported, {} airborne, {} jump(s), "
+                                              "apex {:.1f} above spawn ground {:.1f}, path length {:.1f} units, {} level "
+                                              "change(s): {}",
+                   meshPath, tuning.walkSpeed, tuning.runSpeed, tuning.gravity, tuning.jumpSpeed, tuning.maxStepUp, tick,
+                   supported, airborne, jumps, apex - previousGroundY, previousGroundY, travelled, levelChanges,
+                   alive ? "still standing on the level" : "left the level through a hole");
+
+            // --avatarTraversal=true asks the question the fixed script cannot answer: can one take-off clear a hole the
+            // shipped strips actually leave? It scans the census grid for a supported column with an unsupported span of
+            // jumpable width straight ahead, takes the widest such span, then walks the body at run speed and jumps only when
+            // the next cell forward holds no floor - the rule a player uses looking at a hole. Deterministic, and it says so
+            // out loud if the gated coverage holds nothing jumpable rather than inventing one.
+            if (config.flag("avatarTraversal", false)) {
+                struct Direction { float x, z; };
+                constexpr Direction kDirs[8] = {{1, 0}, {0, 1}, {-1, 0}, {0, -1},
+                                                {0.7071068f, 0.7071068f}, {-0.7071068f, 0.7071068f},
+                                                {-0.7071068f, -0.7071068f}, {0.7071068f, -0.7071068f}};
+                // A flat-ground jump stays airborne for 2 * jumpSpeed / |gravity| seconds, so the gap it clears is that long
+                // times the speed it crossed at: run speed, because nobody walks into a hole they can see. Take-off happens a
+                // quarter cell before the edge (the lip probe below), so that lead comes off the reach before a candidate counts.
+                const float reach = tuning.runSpeed * (2.0f * tuning.jumpSpeed / -tuning.gravity);
+                const float lipProbe = 0.25f * cell;
+                // TerrainQuery::surfaceAt answers with the highest surface at or below (fromY + above) and has no lower
+                // bound, so both ends of a foot probe have to be set by hand. And "within one stride" is not flat enough to
+                // cross on: at run speed a shore that drops 18 units per tick (a ~27 degree ramp, still inside a 25-unit
+                // tolerance sampled every eighth of a cell) falls away faster than gravity brings the body down, so contact
+                // never closes and the jump ends in the void. These probes want real plateaus: three units of sag per eighth
+                // of a cell, about a 3 degree surface, which is what shipped floors look like between holes.
+                constexpr float kFlat = 3.0f;
+                const auto levelFloor = [&](float px, float pz, float refY) {
+                    oa::cdc::TerrainHit h{};
+                    if (!terrain.surfaceAt(px, pz, refY - kFlat, 2.0f * kFlat, &h)) return false;
+                    return h.y >= refY - kFlat;   // the call caps at refY + kFlat already
+                };
+                struct Candidate {
+                    float gap, x, z, ground;
+                    float holeStart, holeEnd;   // distances ahead of the start sample where the void begins and ends
+                    int dir;
+                };
+                // The decoded patches are a lattice of isolated triangles, so probing at the census grid spacing can call a
+                // line "supported" while nothing connects two samples. This scan walks each candidate line at an eighth of a
+                // cell and accepts only holes whose runway and shore are continuous at that resolution: without that rule the
+                // body took off from a sliver, sailed over ground it never touched and fell out of the world, which is what
+                // every attempt on sixteen units did before this change. Top three, widest first.
+                const float probeStep = cell / 8.0f;
+                Candidate best[3] = {};
+                int bestCount = 0;
+                for (std::uint32_t iz = 0u; iz < kSamples; ++iz) {
+                    for (std::uint32_t ix = 0u; ix < kSamples; ++ix) {
+                        const float sx = terrain.boundsMin()[0] + (terrain.boundsMax()[0] - terrain.boundsMin()[0]) *
+                                                                  (static_cast<float>(ix) + 0.5f) / static_cast<float>(kSamples);
+                        const float sz = terrain.boundsMin()[2] + (terrain.boundsMax()[2] - terrain.boundsMin()[2]) *
+                                                                  (static_cast<float>(iz) + 0.5f) / static_cast<float>(kSamples);
+                        oa::cdc::TerrainHit here{};
+                        if (!terrain.surfaceAt(sx, sz, terrain.boundsMax()[1], 4.0f * cell, &here)) continue;
+                        for (int d = 0; d < 8; ++d) {
+                            const float dx = kDirs[d].x, dz = kDirs[d].z;
+                            const auto floorAt = [&](float dist) { return levelFloor(sx + dx * dist, sz + dz * dist, here.y); };
+                            // A solid run-up: a body that starts on an island has nothing to build speed along.
+                            bool runway = true;
+                            for (float dist = -cell; dist < 0.0f && runway; dist += probeStep) runway = floorAt(dist);
+                            if (!runway || !floorAt(0.0f)) continue;
+                            float holeStart = probeStep;
+                            while (holeStart <= reach && floorAt(holeStart)) holeStart += probeStep;
+                            if (holeStart > reach) continue;   // this line holds no edge within jump range
+                            float holeEnd = holeStart;
+                            while (holeEnd <= reach && !floorAt(holeEnd)) holeEnd += probeStep;
+                            const float gap = holeEnd - holeStart;
+                            if (gap < 0.5f * cell || gap + lipProbe > reach) continue;   // a crack is not a jump
+                            // The far side has to stay solid for another cell and a half, not just answer the first probe.
+                            bool shore = true;
+                            for (float dist = holeEnd; dist <= holeEnd + 1.5f * cell && shore; dist += probeStep) {
+                                shore = floorAt(dist);
+                            }
+                            if (!shore) continue;
+                            int slot = bestCount < 3 ? bestCount : 2;
+                            for (; slot > 0 && best[slot - 1].gap < gap; --slot) {
+                                if (slot < 3) best[slot] = best[slot - 1];
+                            }
+                            if (slot < 3 || best[2].gap < gap) {
+                                const int at = slot < 3 ? slot : 2;
+                                best[at] = Candidate{gap, sx, sz, here.y, holeStart, holeEnd, d};
+                                if (bestCount < 3) ++bestCount;
+                            }
+                        }
+                    }
+                }
+                if (bestCount == 0) {
+                    OA_LOG(oa::LogLevel::Warn, "app", "--avatarTraversal found no hole of half a cell to {:.1f} cells with a "
+                                                      "continuous runway and shore in the gated coverage of '{}'",
+                           reach / cell, meshPath);
+                }
+                for (int attempt = 0; attempt < bestCount; ++attempt) {
+                    const Candidate& pick = best[attempt];
+                    const Direction dir = kDirs[pick.dir];
+                    const float yawToFace = std::atan2f(dir.x, dir.z);   // src/game/Avatar.cpp: forward = (sin yaw, cos yaw)
+                    oa::game::AvatarState trav;
+                    if (!oa::game::placeOnGround(&trav, pick.x, pick.z, pick.ground + 10.0f, 30.0f, 40.0f, terrain)) {
+                        OA_LOG(oa::LogLevel::Warn, "app", "--avatarTraversal could not place the body at ({:.1f}, {:.1f})",
+                                   pick.x, pick.z);
+                        continue;
+                    }
+                    OA_LOG(oa::LogLevel::Info, "app", "traversal attempt {} in '{}': a {:.0f}-unit hole ({:.2f} cell(s)) facing "
+                                                      "{} from ({:.1f}, {:.1f}) ground {:.1f}; a jump at run speed reaches "
+                                                      "{:.0f} units less the {:.0f}-unit take-off lead; void runs from {:.0f} "
+                                                      "to {:.0f} ahead", attempt + 1, meshPath, pick.gap, pick.gap / cell,
+                           pick.dir, pick.x, pick.z, pick.ground, reach, lipProbe, pick.holeStart, pick.holeEnd);
+                    std::uint32_t travTicks = 0u, airborneTicks = 0u, jumpsUsed = 0u;
+                    bool travAlive = true, crossed = false;
+                    const float startX = trav.x, startZ = trav.z, startY = trav.y;
+                    constexpr std::uint32_t kBudget = 400u;   // about seven seconds: one jump and a stride to settle
+                    for (; travTicks < kBudget && travAlive; ++travTicks) {
+                        oa::game::AvatarInput input;
+                        input.forward = 1.0f;
+                        input.run = true;
+                        const bool lip = !levelFloor(trav.x + dir.x * lipProbe, trav.z + dir.z * lipProbe, trav.y);
+                        input.jump = trav.grounded && lip;   // take off at the edge, not a cell before it
+                        jumpsUsed += input.jump ? 1u : 0u;
+                        airborneTicks += trav.grounded ? 0u : 1u;
+                        // Stop as soon as the body is standing past the far edge. Further along these decoded fragments
+                        // there is more void, and a later fall would say nothing about whether this hole was cleared.
+                        if (trav.grounded && std::hypot(trav.x - pick.x, trav.z - pick.z) > pick.holeEnd + 0.5f * cell) {
+                            crossed = true;
+                            break;
+                        }
+                        travAlive = oa::game::advance(&trav, input, yawToFace, kStep, terrain, tuning);
+                    }
+                    const float ran = std::hypot(trav.x - startX, trav.z - startZ);
+                    // A crossing has to end on the level it left: a body that drops onto a lower deck went into the hole.
+                    const bool sameLevel = std::fabs(trav.y - startY) <= tuning.maxStepUp;
+                    // A crossing without a take-off is not evidence of one: the body would simply be walking around a hole
+                    // the scan mis-certified because its reference height differs from the placed body's.
+                    const bool over = crossed && travAlive && trav.grounded && sameLevel && jumpsUsed >= 1u;
+                    OA_LOG(oa::LogLevel::Info, "app", "traversal attempt {} over '{}': {} tick(s), {} jump(s), {} airborne "
+                                                      "tick(s), {:.1f} units travelled, ending at ({:.1f}, {:.1f}, {:.1f}) on "
+                                                      "ground {:.1f}: {}", attempt + 1, meshPath, travTicks, jumpsUsed,
+                           airborneTicks, ran, trav.x, trav.y, trav.z, trav.groundY,
+                           over ? "crossed the hole and stands on the far side within one stride of the take-off level"
+                                : (trav.grounded && sameLevel ? "stopped short of the hole"
+                                                             : "fell into the hole or onto a lower deck"));
+                    if (over) {
+                        avatar = trav;   // --avatarFollow / --avatarDrive below pick up the crossing body
+                        break;
+                    }
+                }
+            }
+
+            // --avatarFollow=true moves the look-at to where the run ended, so --meshDump shows the level from her
+            // vantage. It stays off by default because panning away from the mesh centre also moves the byte-exact
+            // --selfCheck probe's framing (docs/TESTING.md), and that check must keep passing on the plain run.
+            if (config.flag("avatarFollow", false)) {
+                followBody = true;
+                followAt[0] = avatar.x;
+                followAt[1] = avatar.y;
+                followAt[2] = avatar.z;
+            }
+
+            // --avatarDrive=true keeps the body after the scripted report and lets keys move it. It starts where the
+            // scripted run finished, so what you see on screen is the same body the numbers describe.
+            if (config.flag("avatarDrive", false)) {
+                if (!alive) {
+                    OA_LOG(oa::LogLevel::Warn, "app", "--avatarDrive skipped: the scripted run already left the level");
+                } else {
+                    driveTerrain = std::move(terrain);
+                    driven = avatar;
+                    driveAvatar = true;
+                    OA_LOG(oa::LogLevel::Info, "app",
+                           "interactive body at ({:.1f}, {:.1f}, {:.1f}) on ground {:.1f}: W/S walk, A/D sidestep, left "
+                           "shift run, space jump; arrows orbit the camera and Q/E dolly. The tuning stays ours "
+                           "(src/game/Avatar.hpp) and these heights still carry GEOMETRY.md §16's caveat.", driven.x,
+                           driven.y, driven.z, driven.groundY);
+                }
+            }
         }
 
         oa::render::MeshUpload mesh;
@@ -484,7 +718,19 @@ int main(int argc, char** argv) {
             mesh.boundsMin[axis] = frameMin[axis];
             mesh.boundsMax[axis] = frameMax[axis];
         }
-        // The gated copy is what goes to the GPU; the ungated list stays available for --walk (see above).
+        // The look-at can only be placed relative to the framing centre, so a follow request waits for this point.
+        viewCentre[0] = (frameMin[0] + frameMax[0]) * 0.5f;
+        viewCentre[1] = (frameMin[1] + frameMax[1]) * 0.5f;
+        viewCentre[2] = (frameMin[2] + frameMax[2]) * 0.5f;
+        if (followBody) {
+            panTarget[0] = followAt[0] - viewCentre[0];
+            panTarget[1] = followAt[1] - viewCentre[1];
+            panTarget[2] = followAt[2] - viewCentre[2];
+            camera.panX = panTarget[0];
+            camera.panY = panTarget[1];
+            camera.panZ = panTarget[2];
+        }
+        // The gated copy is what goes to the GPU and into the terrain grid --avatar=true probes (see above).
         mesh.indices = drawIndices.empty() ? nullptr : &drawIndices;
         if (!renderer.uploadMesh(mesh, &error)) {
             OA_LOG(oa::LogLevel::Error, "app", "cannot upload the triangle run: {}", error);
@@ -605,18 +851,56 @@ int main(int argc, char** argv) {
         window.pumpEvents();
         if (renderer.hasMesh()) {
             // Keys move the mesh camera every frame. The mapping itself lives in render::applyMeshKeys so it is
-            // covered without a window (tests/test_meshcamera.cpp); arrows orbit, WASD slide the target, Q/E dolly.
+            // covered without a window (tests/test_meshcamera.cpp); arrows orbit, Q/E dolly, and WASD slides the look-at
+            // target - unless --avatarDrive=true handed the body to the keyboard, in which case WASD moves her instead.
             oa::render::MeshKeys keys;
             keys.left = window.keyDown(oa::platform::Key::Left);
             keys.right = window.keyDown(oa::platform::Key::Right);
             keys.up = window.keyDown(oa::platform::Key::Up);
             keys.down = window.keyDown(oa::platform::Key::Down);
-            keys.forward = window.keyDown(oa::platform::Key::W);
-            keys.back = window.keyDown(oa::platform::Key::S);
-            keys.strafeRight = window.keyDown(oa::platform::Key::D);
-            keys.strafeLeft = window.keyDown(oa::platform::Key::A);
             keys.dollyIn = window.keyDown(oa::platform::Key::E);
             keys.dollyOut = window.keyDown(oa::platform::Key::Q);
+            if (driveAvatar) {
+                // Fixed 1/60 s ticks taken from a wall-clock accumulator, so real seconds match the tuning while every
+                // tick stays identical; more than a quarter second of gap is dropped instead of catching up on a frame
+                // the window spent hidden. Forward is where the camera looks flattened onto XZ: applyMeshKeys uses
+                // right = (cos yaw, sin yaw) and away = (-sin yaw, cos yaw) while src/game/Avatar.cpp builds forward =
+                // (sin facing, cos facing), so facing = -camera.yaw makes the two bases agree.
+                const auto now = std::chrono::steady_clock::now();
+                driveAccum += std::min(0.25, std::chrono::duration<double>(now - driveLast).count());
+                driveLast = now;
+                constexpr double kDriveStep = 1.0 / 60.0;
+                const auto held = [&](oa::platform::Key key) { return window.keyDown(key) ? 1.0f : 0.0f; };
+                oa::game::AvatarInput input;
+                input.forward = held(oa::platform::Key::W) - held(oa::platform::Key::S);
+                input.right = held(oa::platform::Key::D) - held(oa::platform::Key::A);
+                input.run = window.keyDown(oa::platform::Key::Run);
+                input.jump = window.keyDown(oa::platform::Key::Jump);  // held space hops again on each contact tick
+                while (driveAccum >= kDriveStep) {
+                    driveAccum -= kDriveStep;
+                    if (drivenAlive && !oa::game::advance(&driven, input, -camera.yaw, static_cast<float>(kDriveStep),
+                                                          driveTerrain, driveTuning)) {
+                        drivenAlive = false;
+                        OA_LOG(oa::LogLevel::Warn, "app", "the driven body left the level through a hole at ({:.1f}, "
+                                                          "{:.1f}, {:.1f}); keys stop moving it - re-run for a fresh spawn",
+                               driven.x, driven.y, driven.z);
+                    }
+                    if (++driveTicks % 120u == 0u) {
+                        OA_LOG(oa::LogLevel::Info, "app", "driven body at tick {}: ({:.1f}, {:.1f}, {:.1f}) ground "
+                                                          "{:.1f} {}", driveTicks, driven.x, driven.y, driven.z,
+                               driven.groundY, driven.grounded ? "supported" : "airborne");
+                    }
+                }
+                // Look slightly above the body so she is not framed at knee height, relative to the mesh's centre.
+                panTarget[0] = driven.x - viewCentre[0];
+                panTarget[1] = driven.y + 60.0f - viewCentre[1];
+                panTarget[2] = driven.z - viewCentre[2];
+            } else {
+                keys.forward = window.keyDown(oa::platform::Key::W);
+                keys.back = window.keyDown(oa::platform::Key::S);
+                keys.strafeRight = window.keyDown(oa::platform::Key::D);
+                keys.strafeLeft = window.keyDown(oa::platform::Key::A);
+            }
             oa::render::applyMeshKeys(camera, panTarget, keys, camStep);
             renderer.setMeshCamera(camera);
         }

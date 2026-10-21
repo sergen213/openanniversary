@@ -20,10 +20,11 @@ echo "== 2/3 renderer smoke =="
 game_args=()
 # With a real install available, draw shipped geometry too: one level unit's unindexed vertex run plus its terrain strip
 # records reached through the oct-tree leaves (`--strips=true`, the level unit hash is documented in
-# docs/formats/GEOMETRY.md §6 and §15; OA_MESH_RECORD overrides it for another unit). `--walk=true` also runs the
-# deterministic point agent over that geometry so the query and its harness cannot rot silently - GEOMETRY.md §16 says why
-# its heights are not asserted.
-[[ -n "${OA_GAME_DIR:-}" ]] && game_args+=(--gameDir="$OA_GAME_DIR" --mesh="${OA_MESH_RECORD:-8baf540e}" --strips=true --walk=true)
+# docs/formats/GEOMETRY.md §6 and §15; OA_MESH_RECORD overrides it for another unit). `--avatar=true` runs the movement core
+# (gravity, ground contact with step-up, one jump) over that same gated geometry, so neither the query nor its harness can rot
+# silently - GEOMETRY.md §16-§19 says why those heights are reported rather than asserted. `--avatarTraversal=true` then asks
+# whether one take-off clears a hole that unit actually leaves (docs/TESTING.md §4).
+[[ -n "${OA_GAME_DIR:-}" ]] && game_args+=(--gameDir="$OA_GAME_DIR" --mesh="${OA_MESH_RECORD:-8baf540e}" --strips=true --avatar=true --avatarTraversal=true)
 log="$scratch/smoke.log"; status=0
 if [[ -n "${WAYLAND_DISPLAY:-}" ]]; then
     "$scratch/plain/oa-game" --selfCheck=true --frames=3 "${game_args[@]}" >"$log" 2>&1 || status=$?
@@ -46,6 +47,18 @@ if [[ $status -ne 0 ]]; then
     exit "$status"
 fi
 cat "$log"
+if [[ -n "${OA_GAME_DIR:-}" ]]; then
+    # The traversal probe has to say something definite about the unit it scanned. Silence is how its own bad probes hid at
+    # first: a candidate set built from ceilings read as floors, and a body that detached on the first downhill step.
+    if grep -q 'crossed the hole and stands on the far side' "$log"; then
+        echo "traversal: verified crossing over $(grep -c 'attempt .* in' "$log" | tr -d ' ') candidate(s) scanned"
+    elif grep -q 'found no hole of half a cell' "$log"; then
+        echo "traversal: this unit's gated coverage holds nothing jumpable (stated, not guessed)"
+    else
+        echo "FAIL: traversal reported neither a crossing nor an empty candidate set" >&2
+        exit 1
+    fi
+fi
 echo "== 3/3 unit tests under ASan+UBSan =="
 # Display path is excluded here on purpose: vendor code (SDL/driver) leaks by design and would mask real findings.
 configure "$scratch/san" ON

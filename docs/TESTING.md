@@ -126,14 +126,45 @@ Four independent checks, because "it drew something" is not evidence:
   (`docs/formats/GEOMETRY.md` §15); what the stepped links mean is measured in §16. Nothing culls yet, so whole chains draw.
   `oa-asset <install> terrain --hash 8BAF540E` prints the same walk per tree - nodes, leaves, chain health and edge
   percentiles - and refuses to call a payload an oct-tree when its node fields say otherwise.
-* **Walking over that geometry** — `oa-game --gameDir="<install>" --mesh=8baf540e --strips=true --walk=true --selfCheck=true
-  --frames=1` runs a point agent with gravity on a fixed timestep across a uniform-grid query (`src/cdc/TerrainQuery.*`)
-  built from the same index lists, and logs what it stood on: `terrain grid: 135914 triangle(s), cell 213.5 units, 194x172
-  cells, y -4534..27613`, `walk finished: 773 of 900 tick(s) supported`, and the corners of the triangle it settled on - here
-  `(21537, 15459, 13376) (17178, 20531, 5509) (4649, 26352, 5509)`, an edge of ~13.8k world units. The run is deterministic
-  and repeats identically; those heights are not shipped ground truth: §16 measures two trees whose records are coarse
-  throughout (median longest edges 9,926 and 6,934 units) and that is where the agent lands, and the app says so at Warn level
-  in the same log. The query itself has five data-free tests with exact expected heights: highest surface under foot, top
+* **A body over that geometry** — `oa-game --gameDir="<install>" --mesh=8baf540e --strips=true --avatar=true
+  --selfCheck=true --frames=1` runs the movement core (`src/game/Avatar.*`) with our own tuning - the log prints it: walk 400,
+  run 750, gravity -2000, jump 620, step 25 - as a fixed script of 300 ticks at 1/60 s walking east over the gated index lists
+  with one jump. It reports coverage first (`avatar census: 106 of 2,304 sampled column(s) supported across 31,091x5,509
+  units; densest spot scores 8/8 at (-4,913.4, 9,497.9) ground 11,948.0`), then the run (`229 supported, 71 airborne,
+  1 jump(s), apex 92.2 above spawn ground 11,953.0, path length 2,000.0 units, 17 level change(s)`). The census is the honest
+  part: those chains address one compact block of the vertex array (`docs/formats/GEOMETRY.md` §16, §19), so the spawn search
+  picks the densest spot and every height stays decode-level - said at Warn in the same log. Five `Avatar.*` tests pin the core
+  with no game data: walking at the tuned speed, falling into a pit and landing on its floor, one jump crossing a hole,
+  climbing a step it can reach and never lifting onto a taller one, spawn over a hole refused plus leaving-the-world stopping
+  the run (`oa_tests --gtest_filter=Avatar*`). The older `--walk=true` probe is gone: fixed to a straight line from the mesh
+  centre, it starts over a hole on the gated list and exits with an error while saying less (§19).
+* **Driving that body** — add `--avatarDrive=true`, plus `--avatarFollow=true` if you want the look-at to stay on her (the pan
+  is an offset from the framing centre, so following a body needs that subtraction). W/S walk, A/D sidestep along the camera's
+  right basis, left shift runs, Space jumps; arrows orbit and Q/E dolly as before. Ticks come from a wall-clock accumulator at
+  fixed 1/60 s: presentation runs ~158 fps here, so one tick per frame measured 156 ticks/s - 2.6x the tuning's rate. With
+  pacing on, consecutive `driven body at tick N` reports land exactly 2.0 s apart and a held sidestep measures ~400 units per
+  report window at walk speed. Walking east off the covered patch drops her through a hole; the app then stops moving her with
+  a Warn naming it, which is §16-§17's coverage limit rather than a physics failure. `--meshDump=<path>` writes an offscreen
+  BMP from either vantage (`openanniversary-work/wmem/follow.png` shows the strip patch at her spawn).
+* **Crossing a hole on that geometry** — `oa-game --gameDir="<install>" --mesh=8baf540e --strips=true --avatar=true
+  --avatarTraversal=true --vk.validation=false --frames=1` asks whether one take-off clears a hole the shipped strips actually
+  leave. It scans the census lattice along eight directions, probing every eighth of a cell: a candidate needs flat ground for a
+  full cell behind it (a body on an island has nothing to build speed along), a void at least half a cell wide within jump range,
+  and a far side that stays level for another cell and a half. Flat means within three units of the reference height per probe:
+  a shore inside a one-stride tolerance can still sag 18 units per tick at run speed - a ~27 degree ramp that falls away faster
+  than gravity brings the body down, which is how every attempt failed before the tolerance was tightened. Both ends of the foot
+  probe are set by hand because `TerrainQuery::surfaceAt` accepts any surface at or below `fromY + above`: cap one stride over
+  the reference and refuse anything more than a stride under it, otherwise a ceiling 1,600 units up answers as ground. The run
+  then walks her at run speed and jumps only when the probe a quarter cell ahead stops answering - the rule a player uses
+  looking at an edge - and stops the moment she is standing past the far edge, because further along these fragments there is
+  more void and a later fall would say nothing about this hole. On `8baf540e`: a 196-unit void from 49 to 246 ahead of spawn, one
+  take-off, 35 airborne ticks, standing at ground 11,955.0 having left 11,952.6. Over the sixteen largest version-14 level units
+  (`oa-asset <install> list` sorted by size, filtered to v14 units with a general section above 800 kB): ten crossings, six
+  reporting no candidate rather than inventing one. Two contact rules keep her on that ground and both fail when removed:
+  `Avatar.walksDownASmallStepWithoutLeavingTheGround` (a grounded body sticks to surfaces within one stride below its feet) and
+  `Avatar.landsOnAFloorCrossedMidFall` (the foot query anchors on the higher of old and new feet, so a fall longer than one
+  stride still meets the floor it crossed) - `oa_tests --gtest_filter=Avatar*`.
+* **Query and chain tests** — the query has five data-free tests with exact expected heights: highest surface under foot, top
   floor of two stacked planes, a wall giving no support, refused inputs, cell size taken from the mesh
   (`oa_tests --gtest_filter=TerrainQuery*`). Seven `TerrainStrips.*` tests pin the chain walk on synthetic payloads: a leaf
   head walking to the end of its chain, a bad head counted instead of guessed, a shared tail emitted once, an index naming a

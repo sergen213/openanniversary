@@ -17,8 +17,9 @@ struct WindowConfig {
 
 enum class Key {
     Left, Right, Up, Down,   // arrow keys
-    W, A, S, D,              // pan in the view plane
+    W, A, S, D,              // camera pan in the view plane, or the body's legs under --avatarDrive (apps/game/main.cpp)
     Q, E,                    // zoom out / in
+    Jump, Run,               // space, left shift: the body's jump and run
 };
 
 class Window {

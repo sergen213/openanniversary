@@ -67,9 +67,10 @@ void Window::pumpEvents() {
 }
 
 bool Window::keyDown(Key key) const {
+    // Index order must match enum class Key in Window.hpp; a mismatch would silently swap the controls.
     static constexpr int kScancode[] = {SDL_SCANCODE_LEFT, SDL_SCANCODE_RIGHT, SDL_SCANCODE_UP, SDL_SCANCODE_DOWN,
                                         SDL_SCANCODE_W, SDL_SCANCODE_A, SDL_SCANCODE_S, SDL_SCANCODE_D,
-                                        SDL_SCANCODE_Q, SDL_SCANCODE_E};
+                                        SDL_SCANCODE_Q, SDL_SCANCODE_E, SDL_SCANCODE_SPACE, SDL_SCANCODE_LSHIFT};
     const int index = static_cast<int>(key);
     int count = 0;
     const bool* states = SDL_GetKeyboardState(&count);

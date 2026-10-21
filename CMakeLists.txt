@@ -44,6 +44,11 @@ add_library(oa_cdc STATIC src/cdc/Bigfile.cpp src/cdc/Drm.cpp src/cdc/Texture.cp
 target_include_directories(oa_cdc PUBLIC src)
 target_link_libraries(oa_cdc PUBLIC ZLIB::ZLIB)
 
+# Movement over decoded geometry (docs/ROADMAP.md Milestone 5): no window, no archive, so it tests on synthetic meshes.
+add_library(oa_gameplay STATIC src/game/Avatar.cpp)
+target_include_directories(oa_gameplay PUBLIC src)
+target_link_libraries(oa_gameplay PUBLIC oa_cdc)
+
 # Startup plumbing shared by every target: logging, configuration.
 add_library(oa_core STATIC src/core/Log.cpp src/core/Config.cpp)
 target_include_directories(oa_core PUBLIC src)
@@ -60,15 +65,16 @@ target_include_directories(oa_render PUBLIC src)
 target_link_libraries(oa_render PUBLIC oa_platform Vulkan::Vulkan)
 
 add_executable(oa-game apps/game/main.cpp)
-target_link_libraries(oa-game PRIVATE oa_render oa_cdc)
+target_link_libraries(oa-game PRIVATE oa_render oa_cdc oa_gameplay)
 add_dependencies(oa-game oa_shaders)
 
 if(OA_BUILD_TESTS)
   enable_testing()
   find_package(GTest REQUIRED)
   add_executable(oa_tests tests/test_bigfile.cpp tests/test_core.cpp tests/test_drm.cpp tests/test_geometry.cpp
-                       tests/test_meshcamera.cpp tests/test_texture.cpp tests/test_terrain_query.cpp)
-  target_link_libraries(oa_tests PRIVATE oa_cdc oa_core Vulkan::Headers GTest::gtest_main)
+                       tests/test_meshcamera.cpp tests/test_texture.cpp tests/test_terrain_query.cpp
+                       tests/test_avatar.cpp)
+  target_link_libraries(oa_tests PRIVATE oa_cdc oa_gameplay oa_core Vulkan::Headers GTest::gtest_main)
   include(GoogleTest)
   gtest_discover_tests(oa_tests)
 endif()

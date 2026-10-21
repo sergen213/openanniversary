@@ -12,6 +12,7 @@ apps/ (oa-game)    ← composition only: config, logging, loop; no format or API
   ├── src/platform       SDL3 window + input; the only place that knows about a display server
   ├── src/formats        per-format parsers (DRM v14 units, textures, sound …) — pure data in/out
   ├── src/cdc            container layer: bigfile index, path hashing, record selection/decompression
+  ├── src/game           body over geometry: gravity, ground contact with step-up, jump; depends only on `src/cdc`'s query
   └── src/core           logging, configuration; no dependencies on any of the above
 ```
 

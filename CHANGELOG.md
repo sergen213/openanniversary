@@ -74,8 +74,14 @@ zero version and has no releases yet.
 - `src/cdc/TerrainQuery.*`: a uniform-grid query over a decoded mesh returning the highest supporting surface under a foot,
   with the cell size taken from the mesh's own median edge; five data-free tests pin exact heights (slope interpolation, top
   floor of two stacked planes, a wall that gives no support, refused inputs, self-derived cell size).
-  `oa-game --walk=true` drives a deterministic point agent over that query - gravity, fixed timestep, logged support per tick
-  and the corners of the triangle it settles on.
+- `src/game/Avatar.*`: the movement core - gravity, ground contact with step-up, jump only from contact, fixed timestep - over
+  whatever `TerrainQuery` answers for; five more tests hold it to its tuning (walking at the tuned speed, a pit it falls into
+  and lands on, one jump crossing a hole, a step it may climb and one it must never lift onto, spawn over a hole refused). The
+  tuning numbers are ours and the log prints them so a run is reproducible from the log alone; nothing claims they are
+  `tra.exe`'s. `oa-game --avatar=true` runs them as a fixed script over shipped strips - walk east, take one jump at a fixed
+  tick, keep walking - reporting a coverage census first, then support per tick and level changes; `--avatarDrive=true` hands
+  that same body to W/S/A/D + Space (left shift runs) paced by a wall-clock accumulator at fixed 1/60 s, with
+  `--avatarFollow=true` or the drive loop keeping the look-at on the body (the pan is an offset from the framing centre).
 - `oa_cdc::decodeTerrainOctree()` and `decodeTerrainStripChains()` (`src/cdc/Geometry.*`): the level oct-tree walked through a
   payload of self-relative nodes, and the terrain strip chains its leaves point at - 44-byte header (vertexCount at +0, matIdx
   at +20, nextTexture at +40), u16 index run into the unit's vertex array. Chains are entered only from a leaf reference and
@@ -233,6 +239,17 @@ zero version and has no releases yet.
   which is why `--walk=true` logs at Warn level that these heights measure the decode rather than shipped ground.
   `oa-asset <install> terrain --hash 8BAF540E` reproduces every figure above, and `scripts/ci.sh` passes both game flags whenever
   `OA_GAME_DIR` is set.
+- A body over the gated strips (`docs/formats/GEOMETRY.md` §19, unit `8baf540e`): the grid a foot probes is now the drawn set -
+  `terrain grid: 119452 triangle(s), cell 196.5 units, 159x29 cells, y 1978..16380` - and coverage rather than physics limits
+  it: `avatar census: 106 of 2304 sampled column(s) supported across 31091x5509 units; densest spot scores 8/8 at
+  (-4913.4, 9497.9) ground 11948.0`. From that spot the scripted run reports `229 supported, 71 airborne, 1 jump(s), apex 92.2
+  above spawn ground 11953.0, path length 2000.0 units, 17 level change(s): still standing on the level` against a tuning ideal
+  apex of 96.1 units. Interactive on AMD RX 7900 XTX (RADV NAVI31), validation on: presentation ran ~158 fps while paced ticks
+  reported exactly 2.0 s per 120 ticks, one held sidestep moved (+305.9, +257.7) = 400 units at the walk speed, and Space
+  lifted the body ~86 units above its ground line before contact returned; walking east off the covered patch dropped it to
+  y=1773, where the app stops moving it with a Warn naming the hole. Offscreen dump from her vantage shows the strip patch and
+  its holes, as §18 predicts (`openanniversary-work/wmem/follow.png`). `--selfCheck=true`'s mesh probe still reports
+  `6909/9216 pixels covered by 12829 distinct vertex colours, 0 unexplained` on the gated index buffer.
 - Why a per-material vertex base cannot be recovered from the file alone (`docs/formats/GEOMETRY.md` §17, unit `8baf540e`): the
   offsets that make coarse records short appear nowhere in any stored payload and only one relocation entry names section 0; with
   an honest triangle-quality measure (non-degenerate, all edges under 1,000 units) 89 of 287 material groups are already above 85%
@@ -254,8 +271,26 @@ zero version and has no releases yet.
   parents guests under `wineserver` (`tra.exe` PID 1458690, PPID 1457) - the route that does work is `winedbg` breakpoints at
   measured addresses with its `memsave` command.
 
+- A body now clears a hole on shipped fragments. `--avatarTraversal=true` scans the census lattice along eight directions for a
+  void with flat ground on both sides - probes every eighth of a cell, each within three units of the reference height, because
+  at run speed a shore that sags 18 units per tick (a ~27 degree ramp, still inside a one-stride tolerance) falls away faster
+  than gravity brings the body down and contact never closes - and accepts only holes whose width plus the quarter-cell
+  take-off lead fits inside one jump (`runSpeed * 2 * jumpSpeed / |gravity|` = 465 units at this tuning). On unit `8baf540e` a
+  196-unit void running from 49 to 246 ahead of spawn takes one take-off, 35 airborne ticks, and she stands past the far edge
+  at ground 11,955.0 against 11,952.6 where she left (`docs/TESTING.md` §4). Run over the sixteen largest version-14 level units
+  of the install: **ten show a verified crossing**, six report that their gated coverage holds nothing jumpable rather than
+  inventing one. Heights stay evidence about the decode, not shipped ground (§16).
+
 ### Fixed
 
+- Ground contact let go of any surface even slightly below the feet. `advance()` zeroes velocity while grounded, so with `vy = 0`
+  the new feet position equals the old one and a floor 3.5 units under them failed the `under.y >= nextY` gate: measured on
+  shipped strips, one step away from placement put the body airborne over a ramp and it then fell out of the level instead of
+  running along it. A grounded body now keeps contact with surfaces up to one stride below its feet; an airborne one still only
+  meets what its own step reaches. `Avatar.walksDownASmallStepWithoutLeavingTheGround` pins the stick (eight units down stays in
+  contact, and the test fails when it is removed), and `Avatar.landsOnAFloorCrossedMidFall` pins the other direction: the foot
+  query has to stay anchored on the higher of the old and new feet positions, or a fall longer than one stride (41 units per tick
+  against a 25-unit stride) passes straight through the floor it crossed. Seven Avatar tests pass.
 - Teardown order on early-exit paths (Vulkan init failure, self-check failure): the SDL window and video subsystem were
   destroyed while a `VkSurfaceKHR` was still alive, so validation reported `vkDestroyInstance(): … has 1 leaked objects`,
   naming the surface. One RAII cleanup object now fixes the order for every exit path. Measured under Xvfb (no DRI3):
@@ -288,6 +323,9 @@ zero version and has no releases yet.
   instead of level geometry. A level unit's stride-20 array again draws as one unindexed run until §10's open questions are
   settled; `VkRenderer` keeps the indexed-drawing support its `MeshUpload::indices` field gained, unused until a real
   index source exists.
+- The `--walk=true` point-agent probe in `oa-game`: fixed to a straight line out of the mesh centre, it starts over a hole once
+  the grid is gated to what gets drawn (§19), exits with an error there, and reports strictly less than `--avatar=true`, which
+  counts support, changes level and jumps. §14's numbers stay in the docs as history taken over the ungated list.
 
 ### Not yet implemented
 

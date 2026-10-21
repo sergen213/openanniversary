@@ -361,9 +361,11 @@ on its header - and culling, since every chain in the unit draws whether the cam
 ## 14. What a walk over those strips exposed, measured [V-data]
 
 §13's topology claim rests on edge sharing, which holds for most of the mesh; whether *every* accepted strip lands where it
-should was untested until a point agent was walked over the decoded triangles (`TerrainQuery`, `--walk=true`). It is not.
+should was untested until a point agent was walked over the decoded triangles (`TerrainQuery`, then `--walk=true`). It is not.
+That probe has since been replaced by `--avatar=true` (§19), and these numbers were taken over the **ungated** strip list, so
+they are history rather than something to reproduce:
 
-    oa-game --gameDir="<install>" --mesh=8baf540e --strips=true --walk=true --frames=1
+    oa-game --gameDir="<install>" --mesh=8baf540e --strips=true --walk=true --frames=1   # flag removed; §19 is current
     4559 strip record(s) in 2804 chain link(s): 252,515 triangle(s) over 149,077 vertex/vertices, 25,832 sliver dropped
     terrain grid: 252,515 triangles, cell 201.4 units, 268x249 cells, y -7,755..27,613
     warn [app] the surface under foot comes from strip index lists whose vertex base is not established (GEOMETRY.md 14):
@@ -462,8 +464,9 @@ nine trees address one compact block at the start of the level array [V-data].
 Second, edge length stays bimodal per record, not per decode: the six trees with the most chains have median longest edges
 of 63-206 world units and 3.6-8.5% of edges over 2,000, while sections 200 and 215 - two to three triangles per record -
 sit at medians 9,926 and 6,934 with ~90% over 2,000 [V-data]. Those are whole records whose every triangle is coarse, which
-no linking rule can fix; `--walk=true` still settles on one of them (again an edge of ~13.8k units), so the app keeps
-saying at Warn level that walked heights measure this decode rather than shipped ground. §17 measures what does and does not
+no linking rule can fix; a column query over the ungated list still answers with one of them (again an edge of ~13.8k units),
+so the app keeps saying at Warn level that walked heights measure this decode rather than shipped ground - §19 gates the grid
+a foot probes to what the app actually draws. §17 measures what does and does not
 explain those records.
 
 ## 17. No per-material base is stored in the unit, and geometry alone cannot choose one, measured [V-data]
@@ -492,7 +495,7 @@ the shipped data does not give us.
    S=16,923 while tree 140 needs 22,614 from S=17,178) - one array cannot hold both [V-data]. The model is wrong as stated.
 
 So the decoder keeps what it has: indices are absolute into section 0, which reads coherently for the fine trees and badly for
-the coarse ones, and `--walk=true` stays a Warn-level probe rather than ground truth. What would close this is not more
+the coarse ones, and `--avatar=true` stays a Warn-level probe rather than ground truth. What would close this is not more
 statistics but the one thing these measurements cannot produce - the code in `tra.exe` that builds a terrain group's vertex
 buffer as its unit loads, turning data we already parse into per-material bases. That is where Milestone 4's geometry work goes
 next [S].
@@ -548,3 +551,47 @@ over `8baf540e` section 0 measure how little that rule discriminates:
 The conclusion is §17's, now with the render path confirming it: what is missing is not a better statistic but `tra.exe`'s own
 terrain vertex-buffer build, which turns these payloads into per-material bases. Until that code is read, strip chains stay an
 honest Warn-level probe and every image drawn from them is labelled unverified.
+
+## 19. A body moved over the gated strips stands only where those chains cover ground, measured [V-data] [V-gpu]
+
+A foot now probes exactly what reaches the screen: `--avatar=true` builds its uniform grid from the triangles that survived
+§18's edge gate instead of every chained triangle, because a column query answers with the *highest* covering triangle and the
+ungated list carries slivers tens of thousands of units across. One run of unit `8baf540e` section 0, fixed script (walk east
+2,000 units at 400 u/s, take one jump at a fixed tick, keep walking) using our own tuning, printed in the log:
+
+    oa-game --gameDir="<install>" --mesh=8baf540e --strips=true --avatar=true --selfCheck=true --frames=1
+    terrain grid: 119,452 triangle(s), cell 196.5 units, 159x29 cells, y 1,978..16,380
+    avatar census: 106 of 2,304 sampled column(s) supported across 31,091x5,509 units; densest spot scores 8/8 at
+        (-4,913.4, 9,497.9) ground 11,948.0
+    avatar run over '8baf540e': tuning walk 400 run 750 gravity -2000 jump 620 step 25; 300 tick(s) ran, 229 supported,
+        71 airborne, 1 jump(s), apex 92.2 above spawn ground 11,953.0, path length 2,000.0 units, 17 level change(s):
+        still standing on the level
+
+Four things come out of it:
+
+1. **Coverage, not physics, is what limits a foot** [V-data]. Sampling 48x48 columns across the grid's own footprint finds
+   support in 106 of them - 4.6% - which is §16's compact block showing through: nine trees addressing 16,338 of the section's
+   149,077 vertices cannot tile a 31,091 x 5,509 unit footprint. The spawn search therefore scores every sample by how many of
+   its eight neighbours one cell away are supported as well and takes the densest (8/8 here); from that spot 229 of 300 ticks
+   land while walking straight east. The 71 airborne ticks are gaps at cell scale *inside* the patch - these chains do not
+   cover their own footprint continuously - not a failure of the query.
+2. **The jump arc matches our tuning, which is all it can match** [V-data]. `jumpSpeed` 620 against gravity -2000 gives an
+   ideal apex of 96.1 units; sampling height once per 1/60 s tick reports 92.2 (96%), the difference being where sampled ticks
+   fall around the top of the arc. The five `Avatar.*` tests hold the core to its tuning on synthetic floors, so this number is
+   about coverage and the decode, not about whether the integration works.
+3. **The old fixed-line probe died of this** [V-data]. §14's `--walk=true` started at the mesh centre and walked +x; over the
+   gated list that start sits over a hole, so it fell through at tick 229 and exited with an error while reporting nothing the
+   avatar run does not report better (support counts, level changes, a jump). It is gone rather than kept as a second probe.
+4. **A keyboard-driven body walks, sidesteps and jumps on these triangles, and falls off the patch** [V-gpu].
+   `--avatarDrive=true` hands the same body to W/S/A/D plus Space (left shift runs), with ticks taken from a wall-clock
+   accumulator at fixed 1/60 s: presentation here runs ~158 fps, and one tick per presented frame measured 156 ticks/s - 2.6x
+   faster than the tuning says. With pacing on, consecutive periodic reports land exactly 2.0 s apart for 120 ticks, a held
+   sidestep moves the body (+305.9, +257.7) = 400 units along the camera's right basis over one report window at walk speed,
+   and Space lifts it ~86 units above its ground line before contact returns. Walking east off the covered patch dropped it to
+   y=1,773, where the app stops moving it with a Warn naming the hole. Offscreen dumps from her vantage (`--avatarFollow=true
+   --meshDump=<path>`, kept as `openanniversary-work/wmem/follow.png`) show the triangulated patch and its holes rather than a
+   level, exactly as §18 predicted for gated strips.
+
+So Milestone 5's mechanics run over real decoded triangles today, and what they still cannot do is stand on shipped ground
+where the level actually is. That remains §17's missing per-material vertex-buffer build in `tra.exe` [S]; until it is read,
+every height a foot reports measures this decode.
