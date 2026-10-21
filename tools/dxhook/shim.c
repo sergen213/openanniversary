@@ -80,6 +80,7 @@ static int already(void *p, unsigned bytes)
         seen[nseen].p = p;
         seen[nseen].bytes = bytes;
         ++nseen;
+        return 0; /* first sight of this region: let the dump through */
     }
     return 1; /* table full: stop dumping rather than repeat forever */
 }
@@ -195,10 +196,147 @@ static HRESULT METHOD DrawIP_hook(IDirect3DDevice9 *d, D3DPRIMITIVETYPE type, IN
     return nxt_DrawIP(d, type, bvi, minv, numv, starti, prims);
 }
 
+/* ------------------------------------------- vertex/index buffer creation and filling
+ * The terrain bytes are not available to a probe of our own: those buffers are created WRITEONLY|DYNAMIC (seen in the
+ * create lines), so an outside read-only Lock on them fails, and the game re-locks them every frame without calling
+ * Unlock. Watch the calls that create and fill them instead. Both resource interfaces carry the IDirect3DResource9
+ * prefix (GetType, AddUpdateLock, ReleaseUpdateLock, GetDesc, Lock, Unlock) and DXVK keeps one vtable per class, so
+ * patching the first object of a kind covers every later one; originals are saved once per kind. */
+
+typedef HRESULT (METHOD *CreateVB_t)(IDirect3DDevice9 *, UINT, DWORD, DWORD, D3DPOOL, IDirect3DVertexBuffer9 **, HANDLE *);
+typedef HRESULT (METHOD *CreateIB_t)(IDirect3DDevice9 *, UINT, DWORD, D3DFORMAT, D3DPOOL, IDirect3DIndexBuffer9 **, HANDLE *);
+typedef HRESULT (METHOD *LockRes_t)(void *, unsigned, unsigned, void **, DWORD);
+typedef HRESULT (METHOD *UnlockRes_t)(void *);
+
+/* defined below, referenced by patchResourceVtbl */
+static HRESULT METHOD LockVB_hook(void *, unsigned, unsigned, void **, DWORD);
+static HRESULT METHOD LockIB_hook(void *, unsigned, unsigned, void **, DWORD);
+static HRESULT METHOD UnlockVB_hook(void *);
+static HRESULT METHOD UnlockIB_hook(void *);
+
+static CreateVB_t nxt_CreateVB;
+static CreateIB_t nxt_CreateIB;
+static LockRes_t nxt_Lock_vb, nxt_Lock_ib;
+static UnlockRes_t nxt_Unlock_vb, nxt_Unlock_ib;
+static int vtbl_done[2];
+
+#define MAX_LOCKS 256 /* ponytail: linear scan, one entry per live buffer; the engine keeps far fewer */
+static struct { void *res; void *ptr; unsigned len; } locks[MAX_LOCKS];
+static int nlocks;
+
+static void remember(void *res, void *ptr, unsigned len)
+{
+    for (int i = 0; i < nlocks; ++i)
+        if (locks[i].res == res)
+        {
+            locks[i].ptr = ptr;
+            locks[i].len = len;
+            return;
+        }
+    if (nlocks < MAX_LOCKS)
+    {
+        locks[nlocks].res = res;
+        locks[nlocks].ptr = ptr;
+        locks[nlocks].len = len;
+        ++nlocks;
+    }
+}
+
+static void patchResourceVtbl(void *obj, int isVertex)
+{
+    if (vtbl_done[isVertex])
+        return;
+    vtbl_done[isVertex] = 1;
+    if (isVertex)
+    {
+        patch(obj, SLOT(IDirect3DVertexBuffer9, Lock), (void *)LockVB_hook, (void **)&nxt_Lock_vb);
+        patch(obj, SLOT(IDirect3DVertexBuffer9, Unlock), (void *)UnlockVB_hook, (void **)&nxt_Unlock_vb);
+    }
+    else
+    {
+        patch(obj, SLOT(IDirect3DIndexBuffer9, Lock), (void *)LockIB_hook, (void **)&nxt_Lock_ib);
+        patch(obj, SLOT(IDirect3DIndexBuffer9, Unlock), (void *)UnlockIB_hook, (void **)&nxt_Unlock_ib);
+    }
+}
+
+static unsigned bufferBytes(void *res, int isVertex)
+{
+    if (isVertex)
+    {
+        D3DVERTEXBUFFER_DESC vd;
+        return SUCCEEDED(IDirect3DVertexBuffer9_GetDesc((IDirect3DVertexBuffer9 *)res, &vd)) ? vd.Size : 0;
+    }
+    D3DINDEXBUFFER_DESC id2;
+    return SUCCEEDED(IDirect3DIndexBuffer9_GetDesc((IDirect3DIndexBuffer9 *)res, &id2)) ? id2.Size : 0;
+}
+
+/* The engine re-locks these dynamic buffers every frame and never calls Unlock (measured: a run with 33,398 successful
+ * locks logged none), so the previous lock's bytes are taken here - just before they are overwritten. Level geometry is
+ * static between those re-uploads, which is what this capture needs; already() keeps one file per distinct region. */
+static void savePrevious(void *res, int isVertex)
+{
+    for (int i = 0; i < nlocks; ++i)
+        if (locks[i].res == res && locks[i].ptr)
+        {
+            unsigned bytes = locks[i].len ? locks[i].len : bufferBytes(res, isVertex);
+            logline("save %s res=%p ptr=%p bytes=%u", isVertex ? "vb" : "ib", res, locks[i].ptr, bytes);
+            dump(locks[i].ptr, bytes, isVertex ? "vb" : "ib", isVertex ? &nvb : &nib);
+            return;
+        }
+}
+
+static HRESULT METHOD lockRes(void *res, unsigned off, unsigned len, void **pp, DWORD flags, LockRes_t nxt, int isVertex)
+{
+    savePrevious(res, isVertex);
+    HRESULT hr = nxt(res, off, len, pp, flags);
+    logline("lock %s res=%p off=%u len=%u flags=%lx hr=%08lx ptr=%p", isVertex ? "vb" : "ib", res, off, len, flags, hr,
+            (SUCCEEDED(hr) && pp) ? *pp : NULL);
+    if (SUCCEEDED(hr) && pp && *pp)
+        remember(res, *pp, len);
+    return hr;
+}
+
+static HRESULT METHOD unlockRes(void *res, UnlockRes_t nxt, int isVertex)
+{
+    savePrevious(res, isVertex);
+    return nxt(res);
+}
+
+static HRESULT METHOD LockVB_hook(void *r, unsigned o, unsigned l, void **pp, DWORD f) { return lockRes(r, o, l, pp, f, nxt_Lock_vb, 1); }
+static HRESULT METHOD LockIB_hook(void *r, unsigned o, unsigned l, void **pp, DWORD f) { return lockRes(r, o, l, pp, f, nxt_Lock_ib, 0); }
+static HRESULT METHOD UnlockVB_hook(void *r) { return unlockRes(r, nxt_Unlock_vb, 1); }
+static HRESULT METHOD UnlockIB_hook(void *r) { return unlockRes(r, nxt_Unlock_ib, 0); }
+
+static HRESULT METHOD CreateVB_hook(IDirect3DDevice9 *d, UINT len, DWORD usage, DWORD fvf, D3DPOOL pool,
+                                    IDirect3DVertexBuffer9 **out, HANDLE *sh)
+{
+    HRESULT hr = nxt_CreateVB(d, len, usage, fvf, pool, out, sh);
+    if (SUCCEEDED(hr) && out && *out)
+    {
+        logline("create vb %p bytes=%u usage=%lx fvf=%lx pool=%d", (void *)*out, len, usage, fvf, pool);
+        patchResourceVtbl(*out, 1);
+    }
+    return hr;
+}
+
+static HRESULT METHOD CreateIB_hook(IDirect3DDevice9 *d, UINT len, DWORD usage, D3DFORMAT fmt, D3DPOOL pool,
+                                    IDirect3DIndexBuffer9 **out, HANDLE *sh)
+{
+    HRESULT hr = nxt_CreateIB(d, len, usage, fmt, pool, out, sh);
+    if (SUCCEEDED(hr) && out && *out)
+    {
+        logline("create ib %p bytes=%u usage=%lx fmt=0x%08x pool=%d", (void *)*out, len, usage, fmt, pool);
+        patchResourceVtbl(*out, 0);
+    }
+    return hr;
+}
+
 static void patchDevice(IDirect3DDevice9 *dev)
 {
     patch(dev, SLOT(IDirect3DDevice9, DrawIndexedPrimitive), DrawIP_hook, (void **)&nxt_DrawIP);
     patch(dev, SLOT(IDirect3DDevice9, SetTexture), SetTexture_hook, (void **)&nxt_SetTexture);
+    patch(dev, SLOT(IDirect3DDevice9, CreateVertexBuffer), CreateVB_hook, (void **)&nxt_CreateVB);
+    patch(dev, SLOT(IDirect3DDevice9, CreateIndexBuffer), CreateIB_hook, (void **)&nxt_CreateIB);
     /* Only these two slots are trusted. Patching SLOT(CreateTexture)=23, SLOT(SetFVF)=89 and
      * SLOT(SetMaterial)=49 killed the game at its first Present with "err:seh:NtRaiseException Exception frame is
      * not in stack limits", and those hooks logged impossible arguments - a 6385652x17882624 texture during a

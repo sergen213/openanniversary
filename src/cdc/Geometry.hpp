@@ -14,6 +14,8 @@
 #include <string>
 #include <vector>
 
+#include "cdc/Drm.hpp"
+
 namespace oa::cdc {
 
 inline constexpr std::size_t kMeshVertexBytes = 20;
@@ -101,8 +103,9 @@ bool decodeTerrainOctree(std::span<const std::byte> payload,
 // structural: `vertexCount` in 3..8192 and a multiple of three (measured for every record the leaves reach), the run inside
 // this payload, every index naming a vertex this array holds, and each record emitted once however many leaves reach it.
 struct TerrainStripChain {
-    std::vector<std::uint32_t> indices;             // triangle list: three per triangle, run order kept
+    std::vector<std::uint32_t> indices;             // triangle list, absolute vertex numbers when a base table is given
     std::vector<std::int32_t> materialOfTriangle;   // one matIdx per triangle, same order
+    std::uint32_t unknownMaterials = 0;   // records naming a material the base table has no entry for
     std::uint32_t heads = 0;        // leaf references that produced at least one record
     std::uint32_t records = 0;      // distinct records walked across all chains
     std::uint32_t badHeads = 0;     // leaf references whose bytes are not a record
@@ -112,7 +115,40 @@ struct TerrainStripChain {
 // `heads` are the record offsets an oct-tree's leaves resolve to inside this payload, `vertexCount` is the size of the
 // vertex array those indices address. The call succeeds whenever the payload could be walked: `records == 0` with
 // `badHeads == heads.size()` is the honest answer for a payload holding something else.
+//
+// `materialBase`, when given, maps a record's matIdx to the vertex base its indices are relative to (§20): every index
+// of such a record must fit inside that material's block, and the numbers emitted are absolute (`base + index`). A
+// record naming a material with no entry is not drawn; it lands in `unknownMaterials`.
 bool decodeTerrainStripChains(std::span<const std::byte> payload, std::span<const std::uint32_t> heads,
-                              std::size_t vertexCount, TerrainStripChain* out, std::string* error = nullptr);
+                              std::size_t vertexCount, TerrainStripChain* out, std::string* error = nullptr,
+                              std::span<const std::uint32_t> materialBase = {});
+
+// The per-material vertex base offsets a level unit's strip records lean on (GEOMETRY.md §20). Prior art keeps the same
+// value in `XboxPcMaterialStripList.vbBaseOffset` and hands it to `DrawIndexedPrimitive` as the start vertex
+// (`tr7/game/pc/D3D/d3dterrain.cpp:244`, `tr7/game/terrain.h:67`). In Anniversary's units the list is stored in a type-0
+// section of 20-byte records, one per material **in file order**, whose +8 slot is patched by a kind-0 relocation naming
+// this very section. Measured on unit `4956BEA0` (Croft Manor entrance hall): its section 43 holds exactly 137 such
+// records, the strip chains of that unit name material indices 0..136 with no gaps, and each chain's largest index is at
+// or just under the capacity implied by the next base - 16,096/16,097, 16,349/16,350, 16,092/16,093 and 8,077/8,078 for
+// four of the five blocks - so all 2,339 records fit without a single overflow [V-data].
+struct TerrainMaterialList {
+    std::vector<std::uint32_t> vertexBase;   // one base per material, file order = matIdx
+};
+
+// Reads that table from one section payload. Refuses rather than guesses: fewer than eight relocation slots at a stride
+// of 20 naming this same section (a unit without such a table), a word at +4 of a record that is not zero, or bases that
+// decrease along the run. `selfSection` is the index of `payload`'s section in the unit.
+bool decodeTerrainMaterialBases(std::span<const std::byte> payload, const std::vector<DrmReloc>& relocs,
+                                std::uint32_t selfSection, TerrainMaterialList* out, std::string* error = nullptr);
+
+// Finds a level unit's base table among its sections and returns it. §20 left first-match selection open; sweep over all 50
+// oct-tree units (openanniversary-work/sweep-bases3) shows the rule that picks exactly one run everywhere is **census**: walk
+// every tree without bases once, read each record's matIdx at header +20 (§10), and accept a decoded table only when its
+// length covers all named indices (max < size). 45 units have runs ≥8; the census rule yields exactly one covering run in 35,
+// zero in 5 (no tables); among multi-run units every other fitting candidate leaves unknownMaterials > 0 [V-data]. This call
+// does that: it walks chains itself so callers do not duplicate their own tree walk. `out` is empty and false when the unit
+// has no oct-tree or no table covers its census; on true, *sectionOut names where the run lives for logging.
+bool findTerrainMaterialBases(const DrmFile& drm, std::uint32_t vertexArraySection, TerrainMaterialList* out,
+                              std::size_t* sectionOut = nullptr, std::string* error = nullptr);
 
 }  // namespace oa::cdc

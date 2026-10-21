@@ -476,10 +476,11 @@ The coarse records of §16 look like an unapplied vertex base: prior art draws a
 built at run time - no assignment to `vbBaseOffset` exists anywhere in cdcEngine. Three measurements on unit `8baf540e` say what
 the shipped data does not give us.
 
-1. **The bases are not in the file.** For 79 per-(strip payload, material) offsets that make a group's triangles short (searched
-   across all of section 0), scanning every stored payload for those values as u32 words finds them nowhere, and exactly one
-   relocation entry in the whole unit names section 0: site s160+9360, kind 0, addend 0. Those offsets are computed by the loader,
-   not stored beside the strips they apply to [V-data].
+1. **The bases are not in the file.** *(Wrong; §20 found them stored, and this item's search model is what missed them -
+   kept because its negative results about geometry statistics still stand.)* For 79 per-(strip payload, material) offsets
+   that make a group's triangles short (searched across all of section 0), scanning every stored payload for those values
+   as u32 words finds them nowhere, and exactly one relocation entry in the whole unit names section 0: site s160+9360,
+   kind 0, addend 0. Those offsets are computed by the loader, not stored beside the strips they apply to [V-data].
 2. **Geometry criteria do not pick one out.** Ranking a (strip payload, material) group over every candidate base by *median
    longest edge* is worthless: thousands of bases score 0.0 because that metric rewards mapping indices onto repeated vertices -
    every sampled triangle degenerate. With an honest measure instead - the share of sampled triangles that are non-degenerate
@@ -504,16 +505,14 @@ the shipped data does not give us.
    so each one marks where a material's vertex block ends and the next begins: that is prior art's
    `XboxPcMaterialStripList.vbBaseOffset` (`tr7/game/terrain.h:71`) arriving at `DrawIndexedPrimitive`, exactly as
    `tr7/game/pc/D3D/d3dterrain.cpp:244` draws with it. Item 1 still holds - the unit stores no such number - but their
-   existence per draw is now measured rather than inferred, and what stays unknown is the ordering rule: which
-   material's block starts at each base. Buffer bytes could not be captured to fit that rule in this run, because
-   `GetDesc`/`Lock` on those objects never succeeded (zero dump files): they are default-pool resources uploaded once,
-   with no CPU copy kept afterwards.
+   existence per draw is now measured rather than inferred, and what stays unknown is the ordering rule: which material's
+   block starts at each base. Buffer bytes were never captured in that run - the `GetDesc`/`Lock` calls logged no successes,
+   though the shim also carried a skip-list bug (`tools/dxhook`'s `already()` guard) that suppressed dumps on its own, so
+   whether default-pool resources refuse `Lock` was never established and needs repeating before it is treated as fact.
 
-So the decoder keeps what it has: indices are absolute into section 0, which reads coherently for the fine trees
-and badly for the coarse ones, and `--avatar=true` stays a Warn-level probe rather than ground truth. Item 4 above
-narrows the remaining work considerably - the bases exist at draw time and their sizes match per-material vertex
-blocks, so what has to come out of `tra.exe`, or out of a capture of the uploads that build those blocks, is the
-*ordering rule*: which material's block begins at each base. That is where Milestone 4's geometry work goes next [S].
+So the decoder kept what it had at that moment - absolute indices, coherent for fine trees and badly wrong for coarse ones.
+§20 has since found where those bases live in the file, so this section's remaining value is its negative results (geometry
+statistics cannot choose a base) plus item 4, whose run-time numbers §20 now matches word for word out of the archive [V-data].
 
 Three cheaper ways of reaching that code were tried and came up empty, so they are recorded here to stop repeats [V-data]:
 
@@ -567,9 +566,9 @@ over `8baf540e` section 0 measure how little that rule discriminates:
    shows one large dark triangulated sheet, holes exactly where gated chains were dropped, and bright fans of near-degenerate
    triangles; nothing reads as a level [V-gpu]. Milestone 4's "recognizable scene" bar is not met by strip walking alone.
 
-The conclusion is §17's, now with the render path confirming it: what is missing is not a better statistic but `tra.exe`'s own
-terrain vertex-buffer build, which turns these payloads into per-material bases. Until that code is read, strip chains stay an
-honest Warn-level probe and every image drawn from them is labelled unverified.
+The conclusion at the time was §17's, and this section confirmed only that no statistic can replace it. What was missing has
+since been found - the per-material bases are stored in the unit (§20), which is what turns these chains into ground a foot
+can stand on; the gate itself stays presentation hygiene, not evidence [V-data].
 
 ## 19. A body moved over the gated strips stands only where those chains cover ground, measured [V-data] [V-gpu]
 
@@ -611,6 +610,61 @@ Four things come out of it:
    --meshDump=<path>`, kept as `openanniversary-work/wmem/follow.png`) show the triangulated patch and its holes rather than a
    level, exactly as §18 predicted for gated strips.
 
-So Milestone 5's mechanics run over real decoded triangles today, and what they still cannot do is stand on shipped ground
-where the level actually is. That remains §17's missing per-material vertex-buffer build in `tra.exe` [S]; until it is read,
-every height a foot reports measures this decode.
+So Milestone 5's mechanics run over real decoded triangles today. What they could not do at the time of writing was stand on
+shipped ground where the level actually is; §20 has since supplied what was missing - the per-material bases are stored in the
+unit, and applying them reaches all 72,832 vertices of that array rather than only its first block.
+
+## 20. The unit does store the per-material vertex bases, as a record array in one of its sections, measured [V-data]
+
+§17 item 1 said these numbers were not in the file. It was wrong: they sit in a section of their own, laid out as records
+of **stride 20** whose first word is the base, and reading them fixes the geometry §16-§19 could not explain.
+
+Unit `4956BEA0` (the entrance hall §17 item 4 measured from inside the running game) holds such a section at index **43**:
+a run of **137** records starting at payload offset 9,340, each record holding base u32 (+0), zero (+4), a slot that a
+kind-0 relocation patches and that names this same section (+8), one packed word whose low half runs over values like
+1,532/2,351 while its high half is 32 in every shipped record of the run (+12), then zero (+16). The base values along
+the run are `{0 x25, 16097 x31, 32447 x29, 48540 x28, 64754 x24}` - the same five numbers §17 item 4 measured arriving at
+`DrawIndexedPrimitive`, now read out of the archive [V-data].
+
+The rule that ties them to strips is positional: **record i belongs to material index i**, and a strip record's `matIdx`
+(header +20) selects it. Measured over all 2,339 chain records walked from unit `4956BEA0`'s one oct-tree (section 38):
+
+- the chains name matIdx values **exactly 0..136 with no gaps**, matching a table of exactly that length;
+- every record's largest index lands at or just under the capacity its base implies, and for four of the five blocks it
+  hits the ceiling precisely - `16,096` against capacity `16,097`, `16,349`/`16,350`, `16,092`/`16,093`, `8,077`/`8,078`
+  - so all 2,339 records fit with **zero** overflows [V-data];
+- applying the bases turns indices absolute (`base + index`) and every vertex of section 0 becomes reachable: reached
+  vertices go from `16,350 of 72,832` to `72,832 of 72,832`, median longest edge falls from 355 to **153** world units,
+  and the share over 2,000 units drops from 8.53 % to **1.94 %**, with `unknown=0` (no record naming a material outside
+  the table) [V-data].
+
+So §17 item 1's scan missed them because it searched for per-(payload, material) *offsets* computed under its own wrong
+model of what an unapplied base looked like; and §18/§19's conclusion - that `tra.exe`'s vertex-buffer build has to be
+read before the strips can be trusted - no longer holds.
+
+The library reads this table as `oa::cdc::decodeTerrainMaterialBases()` (`src/cdc/Geometry.*`) and applies it inside
+`decodeTerrainStripChains()`, which now emits absolute indices; both callers (the app's strip path, `--strips=true` /
+`--avatar=true`, and `oa-asset terrain`) ask for the table once per unit. The detector is deliberately narrow - kind-0
+slots at a stride of 20 naming their own section, longest such run at least eight records, zero in word +4, bases
+non-decreasing - and it refuses rather than guesses. A wrong pick cannot corrupt geometry silently: the capacity test then
+drops those records into `badHeads`, or `unknownMaterials` when a chain names a material index beyond the table [V-data].
+
+Sweep over every archive record between 6 MB and 25 MB (133 records, of which **57** parse as v14 units carrying at least
+one oct-tree): **45 of those 57 yield a base table**, `unknown=0` in 43; two refuse whole groups of records against the
+table they got (`6C476294`: 302 unknown, `CE53803B`: 69), and **12 units give no table at all** [V-data]. Units carry other
+runs with the same stride-20 shape that are not terrain material tables - in `8baf540e` sections 153/160/188/191/206 hold
+such runs whose first words (79,702 / 95,369 / 111,332 ...) belong to per-object model geometry rather than the level's
+array - and today's rule simply takes the first section that passes, which lands on `8baf540e`'s real table (section
+**141**, **92** bases over `{0, 16119, 32020}`, unknown=0) by ordering luck rather than by a rule [S].
+
+Still open, in the order that matters:
+
+- **Which section is *the* terrain table.** Selecting among same-shaped runs needs a rule from the shipped data -
+  probably binding tables to trees through the oct-tree or its draw records - not first-match. Until then
+  `unknownMaterials` and `badHeads` are the tell, per unit [S].
+- **What +8 and +12 mean.** The +8 slots carry relocations naming their own section with addends (in this unit
+  12,072..21,384) that land in a stretch of that payload holding nothing but zeros, so they are not strip-record pointers;
+  the packed word at +12 is unexplained beyond its measured shape [V-data].
+- **The coarse remainder.** Even with bases applied some trees keep large shares over 2,000 units (sweep maxima run from
+  3.5 % to 91.8 %, e.g. `8baf540e`'s ninth tree at 91.8 %) - the sections §16 already flagged as coarse-record trees are
+  not explained by bases [V-data].

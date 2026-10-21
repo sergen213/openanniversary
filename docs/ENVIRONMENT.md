@@ -34,6 +34,9 @@ skipped, so it is noise rather than a fault; remove the leftover layer manifest 
 | Vulkan headers / loader / tools / validation | 1.4.363.x | `pacman -Q vulkan-headers volk glslang` |
 | glslangValidator / glslc / spirv-val | present (`1:1.4.363.0`) | `command -v` |
 | lld / ld.lld | present; `mold`, `dxcompiler`, `dxc` absent | `command -v` |
+| Wine (research tool, never a runtime) | `wine-11.20` | `wine --version` |
+| DXVK 3.1 (inside the Wine prefix only) | `~/.config/heroic/tools/dxvk/dxvk-3.1` | directory listing |
+| RenderDoc (research tool; Linux build injects nothing into Wine guests, see below) | 1.46 | `renderdoccmd --version` |
 
 C++ standard in use: `-std=c++23` (compilers also accept newer modes, but C++23 is the floor we build against).
 Warning set: `-Wall -Wextra -Wpedantic -Wshadow -Wconversion`. Debug builds get ASan/UBSan with `-DOA_SANITIZE=ON`.
@@ -70,7 +73,7 @@ level assets are loaded and on screen. RSS: 214 MB at the menu, ~259-265 MB in-l
 
 Two runtime-evidence routes were tried and both need more work than they look:
 
-- **GPU capture:** RenderDoc 1.45 (Arch package) produced **no file at all** when launched as
+- **GPU capture:** RenderDoc 1.45 (Arch package; now 1.46) produced **no file at all** when launched as
   `renderdoccmd capture -w … wine ./tra.exe` - the Linux build does not inject into Wine guest processes. Capturing D3D
   traffic needs a Windows RenderDoc inside the prefix, or DXVK-side hooks.
 - **Address-space reading:** `/proc/<pid>/mem` returns `EACCES`. Kernel Yama is at `ptrace_scope = 1`, and Wine's PE

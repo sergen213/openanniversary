@@ -351,4 +351,96 @@ TEST(TerrainStrips, yieldsNothingForAPayloadHoldingSomethingElse) {
 }
 
 
+TEST(TerrainMaterialBases, readsTheTableInFileOrder) {
+    // Twelve 20-byte records at a stride of 20, each naming one material's first vertex in the unit's array (§20). The
+    // +8 slot is what a kind-0 relocation patches, and it names this very section.
+    const std::uint32_t bases[] = {0u, 0u, 64u, 64u, 64u, 128u, 128u, 128u, 128u, 192u, 192u, 192u};
+    std::vector<std::byte> payload(96u, std::byte{0});   // the table need not start at offset zero
+    std::vector<oa::cdc::DrmReloc> relocs;
+    for (std::size_t k = 0; k < 12u; ++k) {
+        putU32(payload, bases[k]);
+        putU32(payload, 0u);                    // +4 measured zero across the shipped table
+        putU32(payload, 0x1234u);               // +8 pointer slot
+        putU32(payload, 7u | (32u << 16u));     // +12 packed material and texture-page id
+        putU32(payload, 0u);                    // +16
+        relocs.push_back(oa::cdc::DrmReloc{static_cast<std::uint16_t>(6u << 3u), 0u,   // kind 0 naming section 5
+                                           static_cast<std::uint32_t>(96u + 20u * k + 8u)});
+    }
+
+    oa::cdc::TerrainMaterialList list;
+    std::string error;
+    ASSERT_TRUE(oa::cdc::decodeTerrainMaterialBases(payload, relocs, 5u, &list, &error)) << error;
+    EXPECT_EQ(list.vertexBase, (std::vector<std::uint32_t>(bases, bases + 12)));
+}
+
+TEST(TerrainMaterialBases, refusesPayloadsThatAreNotATable) {
+    const auto build = [](const std::vector<std::uint32_t>& values, int corruptRecord, bool dropTail) {
+        struct Built {
+            std::vector<std::byte> payload;
+            std::vector<oa::cdc::DrmReloc> relocs;
+        } out{};
+        const std::size_t count = values.size() - (dropTail ? 5u : 0u);
+        for (std::size_t k = 0; k < count; ++k) {
+            putU32(out.payload, values[k]);
+            putU32(out.payload, k == static_cast<std::size_t>(corruptRecord) ? 1u : 0u);
+            putU32(out.payload, 0x1234u);
+            putU32(out.payload, 7u);
+            putU32(out.payload, 0u);
+            out.relocs.push_back(oa::cdc::DrmReloc{static_cast<std::uint16_t>(6u << 3u), 0u,
+                                                   static_cast<std::uint32_t>(20u * k + 8u)});
+        }
+        return out;
+    };
+    const std::vector<std::uint32_t> good{0u, 0u, 64u, 64u, 64u, 128u, 128u, 128u, 192u, 192u};
+    std::string error;
+    oa::cdc::TerrainMaterialList list;
+
+    const auto shortRun = build(good, -1, true);   // five records dropped: a run of five is not a table
+    EXPECT_FALSE(oa::cdc::decodeTerrainMaterialBases(shortRun.payload, shortRun.relocs, 5u, &list, &error));
+    EXPECT_NE(error.find("longest run"), std::string::npos) << error;
+
+    const auto dirty = build(good, 3, false);      // the word after the base is zero in every shipped record
+    EXPECT_FALSE(oa::cdc::decodeTerrainMaterialBases(dirty.payload, dirty.relocs, 5u, &list, &error));
+    EXPECT_NE(error.find("non-zero word"), std::string::npos) << error;
+
+    const auto decreasing = build({0u, 64u, 32u, 64u, 64u, 128u, 128u, 128u, 192u, 192u}, -1, false);
+    EXPECT_FALSE(oa::cdc::decodeTerrainMaterialBases(decreasing.payload, decreasing.relocs, 5u, &list, &error));
+    EXPECT_NE(error.find("decrease"), std::string::npos) << error;
+}
+
+TEST(TerrainStrips, addsTheMaterialBaseToEveryIndexOfARecord) {
+    // Material 1's block starts at vertex 8, so its indices name 8, 9 and 10 in the unit's array.
+    const std::vector<std::byte> payload = join({strip(3, 1, 50u, {0, 1, 2}), strip(6, 1, 0u, {0, 1, 2, 3, 4, 5})});
+    const std::uint32_t heads[] = {0u};
+    const std::uint32_t bases[] = {0u, 8u};
+    TerrainStripChain walked;
+    std::string error;
+    ASSERT_TRUE(oa::cdc::decodeTerrainStripChains(payload, heads, 64u, &walked, &error, bases)) << error;
+    EXPECT_EQ(walked.records, 2u);
+    EXPECT_EQ(walked.unknownMaterials, 0u);
+    EXPECT_EQ(walked.indices, (std::vector<std::uint32_t>{8, 9, 10, 8, 9, 10, 11, 12, 13}));
+}
+
+TEST(TerrainStrips, refusesARecordOutsideItsMaterialBlock) {
+    TerrainStripChain unknown;
+    std::string error;
+    const std::uint32_t heads[] = {0u};
+    const std::uint32_t bases[] = {0u, 8u};
+
+    // A material the table has no block for: nothing is drawn for it and it is counted, not relocated by guesswork.
+    const std::vector<std::byte> unmapped = join({strip(3, 9, 0u, {0, 1, 2})});
+    ASSERT_TRUE(oa::cdc::decodeTerrainStripChains(unmapped, heads, 64u, &unknown, &error, bases)) << error;
+    EXPECT_EQ(unknown.records, 0u);
+    EXPECT_EQ(unknown.unknownMaterials, 1u);
+    EXPECT_TRUE(unknown.indices.empty());
+
+    // Material 1 holds eight vertices from base 8, so index 30 (vertex 38) is outside a 32-vertex array.
+    const std::vector<std::byte> overflow = join({strip(3, 1, 0u, {0, 1, 30})});
+    TerrainStripChain refused;
+    ASSERT_TRUE(oa::cdc::decodeTerrainStripChains(overflow, heads, 32u, &refused, &error, bases)) << error;
+    EXPECT_EQ(refused.records, 0u);
+    EXPECT_EQ(refused.badHeads, 1u);
+    EXPECT_TRUE(refused.indices.empty());
+}
+
 }  // namespace

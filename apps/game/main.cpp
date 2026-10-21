@@ -326,6 +326,16 @@ int main(int argc, char** argv) {
             std::uint32_t heads = 0;
             std::uint32_t badHeads = 0;
             std::uint32_t brokenLinks = 0;
+            // §20 + sweep-bases3 (GEOMETRY.md §21): a strip record's indices are relative to its material's block of this vertex
+            // array, and the unit stores each block's base in a section of its own. findTerrainMaterialBases walks every tree once
+            // without bases first — which same-shaped run is THE table answers from the matIdx values (header +20) those chains
+            // name: take the first decoded table whose length covers them all. Units with no covering table stay absolute (§13).
+            oa::cdc::TerrainMaterialList materials;
+            bool haveMaterials = false;
+            std::string tableError;   // names the refusing rule when no section's run covers this unit's chains (§21)
+            if (oa::cdc::findTerrainMaterialBases(drm, 0u, &materials, nullptr, &tableError)) {   // §21 census rule
+                haveMaterials = true;
+            }   // no else needed; §13's absolute reading stands when the census finds nothing to cover
             for (std::size_t i = 0; i < drm.sections().size(); ++i) {
                 const oa::cdc::DrmSection& nodeSection = drm.sections()[i];
                 if (!nodeSection.stored || nodeSection.relocCount == 0) continue;
@@ -349,8 +359,10 @@ int main(int argc, char** argv) {
                     if (!strip.stored) continue;
                     oa::cdc::TerrainStripChain walked;
                     std::string chainError;
-                    if (!oa::cdc::decodeTerrainStripChains(drm.payload(strip), entry.second, vertices.size(), &walked,
-                                                           &chainError)) {
+                    if (!oa::cdc::decodeTerrainStripChains(
+                            drm.payload(strip), entry.second, vertices.size(), &walked, &chainError,
+                            haveMaterials ? std::span<const std::uint32_t>(materials.vertexBase)
+                                          : std::span<const std::uint32_t>{})) {
                         OA_LOG(oa::LogLevel::Warn, "app", "section {} of '{}' chains skipped: {}", entry.first, meshPath,
                                chainError);
                         continue;
@@ -359,11 +371,11 @@ int main(int argc, char** argv) {
                     heads += walked.heads;
                     badHeads += walked.badHeads;
                     brokenLinks += walked.brokenLinks;
-                    // Gate what goes to the screen, which is also what a foot probes through the terrain grid (§19). §16-§17 measure that edge length is
-                    // bimodal per record under base 0: most chains sit at 63-206 world units while whole records land at
-                    // ~7k-10k because their indices name a region of section 0 no base has been established for (§18). The
-                    // same rule GEOMETRY.md §17 uses to score a vertex base - non-degenerate, longest edge under 1,000 units -
-                    // is what goes to the screen here; triangles outside it are counted and left undrawn, not guessed at.
+                    // Gate what goes to the screen, which is also what a foot probes through the terrain grid (§19). With
+                    // §20's bases in place almost every triangle is tight (unit 4956BEA0: p50 edge 153 units); a residual
+                    // population still lands at thousands of units, so an edge gate like the one §18 tried keeps it off -
+                    // non-degenerate (shortest edge over 1 unit) and longest edge under 1,000 units. Those triangles are
+                    // counted in `coarseTriangles` and left undrawn, not guessed at.
                     for (std::size_t t = 0; t + 2 < walked.indices.size(); t += 3u) {
                         const auto& a = vertices[walked.indices[t]];
                         const auto& b = vertices[walked.indices[t + 1u]];

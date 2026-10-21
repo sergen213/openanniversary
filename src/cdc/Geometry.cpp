@@ -4,6 +4,7 @@
 #include <array>
 #include <cstring>
 #include <limits>
+#include <map>
 #include <utility>
 #include <vector>
 
@@ -81,7 +82,8 @@ std::uint16_t loadU16(const std::byte* at) {
 
 
 bool decodeTerrainStripChains(std::span<const std::byte> payload, std::span<const std::uint32_t> heads,
-                               std::size_t vertexCount, TerrainStripChain* out, std::string* error) {
+                               std::size_t vertexCount, TerrainStripChain* out, std::string* error,
+                               std::span<const std::uint32_t> materialBase) {
     constexpr std::size_t kHeaderBytes = 44;   // GEOMETRY.md §10, prior art tr7/game/terrain.h:46
     const auto fail = [&](const std::string& message) {
         if (error != nullptr) *error = message;
@@ -90,7 +92,7 @@ bool decodeTerrainStripChains(std::span<const std::byte> payload, std::span<cons
     if (out == nullptr) return fail("decodeTerrainStripChains needs an output struct");
     out->indices.clear();
     out->materialOfTriangle.clear();
-    out->heads = out->records = out->badHeads = out->brokenLinks = 0u;
+    out->heads = out->records = out->badHeads = out->brokenLinks = out->unknownMaterials = 0u;
 
     // A header is read wherever a link points, and the chain continues while its vertexCount is non-zero - prior art's own
     // walk, `for (strip = tsi; strip->vertexCount > 0; strip = strip->nextTexture)` (`tr7/game/pc/D3D/d3dterrain.cpp:117`).
@@ -107,12 +109,12 @@ bool decodeTerrainStripChains(std::span<const std::byte> payload, std::span<cons
         *next = loadU32(payload.data() + at + 40u);
         return true;
     };
-    const auto validRecord = [&](std::size_t at, std::uint32_t count) {
+    const auto validRecord = [&](std::size_t at, std::uint32_t count, std::uint32_t base) {
         if (count < 3u || count > 8192u || count % 3u != 0u) return false;
         if (at + kHeaderBytes + 2u * static_cast<std::size_t>(count) > payload.size()) return false;
         const std::byte* run = payload.data() + at + kHeaderBytes;
         for (std::uint32_t i = 0; i < count; ++i) {
-            if (static_cast<std::size_t>(loadU16(run + 2u * i)) >= vertexCount) return false;
+            if (static_cast<std::size_t>(base) + loadU16(run + 2u * i) >= vertexCount) return false;
         }
         return true;
     };
@@ -130,7 +132,15 @@ bool decodeTerrainStripChains(std::span<const std::byte> payload, std::span<cons
                 break;
             }
             if (count == 0u) break;   // the end-of-chain marker prior art tests for
-            if (!validRecord(at, count)) {
+            std::uint32_t base = 0u;
+            if (!materialBase.empty()) {
+                if (matIdx < 0 || static_cast<std::size_t>(matIdx) >= materialBase.size()) {
+                    out->unknownMaterials += 1u;   // the table names no block for this record's material
+                    break;
+                }
+                base = materialBase[static_cast<std::size_t>(matIdx)];
+            }
+            if (!validRecord(at, count, base)) {
                 if (producedAny) out->brokenLinks += 1u; else out->badHeads += 1u;
                 break;
             }
@@ -141,9 +151,9 @@ bool decodeTerrainStripChains(std::span<const std::byte> payload, std::span<cons
                 out->records += 1u;
                 const std::byte* run = payload.data() + at + kHeaderBytes;
                 for (std::uint32_t i = 0; i + 2u < count; i += 3u) {
-                    out->indices.push_back(loadU16(run + 2u * i));
-                    out->indices.push_back(loadU16(run + 2u * (i + 1u)));
-                    out->indices.push_back(loadU16(run + 2u * (i + 2u)));
+                    out->indices.push_back(base + loadU16(run + 2u * i));
+                    out->indices.push_back(base + loadU16(run + 2u * (i + 1u)));
+                    out->indices.push_back(base + loadU16(run + 2u * (i + 2u)));
                     out->materialOfTriangle.push_back(matIdx);
                 }
             } else if (!producedAny) {
@@ -211,6 +221,124 @@ bool decodeTerrainOctree(std::span<const std::byte> payload,
         }
     }
     *out = std::move(tree);
+    if (error != nullptr) error->clear();
+    return true;
+}
+
+bool decodeTerrainMaterialBases(std::span<const std::byte> payload, const std::vector<DrmReloc>& relocs,
+                                 std::uint32_t selfSection, TerrainMaterialList* out, std::string* error) {
+    constexpr std::size_t kRecordBytes = 20u;   // GEOMETRY.md §20
+    constexpr std::size_t kPointerSlot = 8u;
+    const auto fail = [&](const std::string& message) {
+        if (error != nullptr) *error = message;
+        return false;
+    };
+    if (out == nullptr) return fail("decodeTerrainMaterialBases needs an output struct");
+
+    // Candidate record starts: kind-0 slots that name this very section, back-stepped over the pointer slot. A strip
+    // record's own nextTexture link also names its section, but it sits at header +40 and chains are laid out at
+    // variable pitch, so those never join a 20-byte run.
+    std::vector<std::uint32_t> starts;
+    for (const auto& reloc : relocs) {
+        if (relocKind(reloc) != 0u || relocSectionIndex(reloc) != selfSection) continue;
+        if (reloc.siteOffset < kPointerSlot) continue;
+        const std::uint32_t at = reloc.siteOffset - static_cast<std::uint32_t>(kPointerSlot);
+        if (static_cast<std::size_t>(at) + kRecordBytes > payload.size()) continue;
+        starts.push_back(at);
+    }
+    std::sort(starts.begin(), starts.end());
+    starts.erase(std::unique(starts.begin(), starts.end()), starts.end());
+
+    std::size_t bestLength = 0u, bestIndex = 0u;
+    for (std::size_t i = 0; i < starts.size(); ) {
+        std::size_t j = i;
+        while (j + 1u < starts.size() && starts[j + 1u] == starts[j] + kRecordBytes) ++j;
+        if (j - i + 1u > bestLength) { bestLength = j - i + 1u; bestIndex = i; }
+        i = j + 1u;
+    }
+    if (bestLength < 8u) {
+        return fail("no material base table: " + std::to_string(starts.size()) + " own-section slots, longest run of "
+                    "20-byte records is " + std::to_string(bestLength));
+    }
+
+    TerrainMaterialList list;
+    for (std::size_t k = 0; k < bestLength; ++k) {
+        const std::size_t at = starts[bestIndex + k];
+        if (loadU32(payload.data() + at + 4u) != 0u) {
+            return fail("material record at " + std::to_string(at) + " has a non-zero word after the base");
+        }
+        const std::uint32_t base = loadU32(payload.data() + at);
+        if (!list.vertexBase.empty() && base < list.vertexBase.back()) {
+            return fail("material bases decrease at " + std::to_string(at));
+        }
+        list.vertexBase.push_back(base);
+    }
+    *out = std::move(list);
+    if (error != nullptr) error->clear();
+    return true;
+}
+
+bool findTerrainMaterialBases(const DrmFile& drm, std::uint32_t vertexArraySection, TerrainMaterialList* out,
+                              std::size_t* sectionOut, std::string* error) {
+    const auto fail = [&](const std::string& message) {
+        if (error != nullptr) *error = message;
+        return false;
+    };
+    if (out == nullptr) return fail("findTerrainMaterialBases needs an output struct");
+    if (vertexArraySection >= drm.sections().size()) return fail("vertex array section index out of range");
+    const auto& vertexPayload = drm.payload(drm.sections()[vertexArraySection]);
+    const std::size_t vertexCount = vertexPayload.size() / kMeshVertexBytes;
+
+    // Census walk (§10, §15): every oct-tree's leaf references entered base-free. Material indices ride in the records
+    // themselves (header +20), so this pass is table-independent and gives one honest set per unit to test against.
+    std::map<std::uint32_t, std::vector<std::uint32_t>> headsPerSection;
+    for (std::size_t i = 1; i < drm.sections().size(); ++i) {
+        const auto& nodeSection = drm.sections()[i];
+        if (!nodeSection.stored || nodeSection.relocCount == 0u) continue;
+        std::map<std::uint32_t, std::pair<std::uint32_t, std::uint32_t>> references;
+        for (const auto& r : drm.relocations(nodeSection)) {
+            if (relocKind(r) != 0u) continue;   // node fields are patched by kind-0 entries (§9)
+            references[static_cast<std::uint32_t>(r.siteOffset)] = {
+                static_cast<std::uint32_t>(relocSectionIndex(r)), drm.relocAddend(nodeSection, r)};
+        }
+        TerrainOctree tree;
+        std::string why;
+        if (!decodeTerrainOctree(drm.payload(nodeSection), references, &tree, &why)) continue;
+        for (const auto& leaf : tree.leafList) {
+            if (leaf.targetSection >= drm.sections().size()) continue;
+            headsPerSection[leaf.targetSection].push_back(leaf.offsetInTarget);
+        }
+    }
+    if (headsPerSection.empty()) return fail("unit has no oct-tree leaf references to census");
+    std::int32_t maxMat = -1;   // largest header +20 value any walked record names (§10)
+    for (const auto& entry : headsPerSection) {
+        const auto& strip = drm.sections()[entry.first];
+        if (!strip.stored) continue;
+        TerrainStripChain walked;
+        std::string chainError;   // a walk that produces nothing still answers honestly (§15); census only needs mats read
+        decodeTerrainStripChains(drm.payload(strip), entry.second, vertexCount, &walked, &chainError);
+        for (const auto m : walked.materialOfTriangle) if (m > maxMat) maxMat = m;   // triangles share their record's matIdx
+    }
+    if (maxMat < 0) return fail("walked chains name no material indices to select a table against");
+
+    // Candidate sections in file order; the first decoded table covering every named matIdx wins. §20's narrow detector
+    // still refuses junk per section, and coverage over all walked records is what separates this unit's terrain table
+    // from same-shaped runs serving its model arrays: sweep-bases3 measured 45 units with candidate runs, exactly one
+    // covering run in every case that has a table at all (35 unique; the other 10 are multi-run where only coverage separates).
+    TerrainMaterialList list;
+    std::size_t found = drm.sections().size();
+    for (std::size_t i = 1; i < drm.sections().size() && found == drm.sections().size(); ++i) {
+        const auto& candidate = drm.sections()[i];
+        if (!candidate.stored || candidate.relocCount == 0u) continue;   // §20: table sections patch their own +8 slots
+        std::string why;
+        decodeTerrainMaterialBases(drm.payload(candidate), drm.relocations(candidate), static_cast<std::uint32_t>(i), &list, &why);
+        if (static_cast<long long>(list.vertexBase.size()) > maxMat) { found = i; break; }   // covers every named matIdx (§10 +20 < size) [V-data sweep-bases3]
+    }
+    if (found == drm.sections().size()) {   // no section's table covers this unit's material census (§20 open item 1)
+        return fail("no base table covers the walked chains' matIdx range up to " + std::to_string(maxMat));
+    }
+    *out = std::move(list);
+    if (sectionOut != nullptr) *sectionOut = found;
     if (error != nullptr) error->clear();
     return true;
 }

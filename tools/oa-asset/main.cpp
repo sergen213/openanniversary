@@ -470,6 +470,28 @@ int main(int argc, char** argv) {
             return std::sqrt(squared);
         };
 
+        // §20 + sweep-bases3 (GEOMETRY.md §21): a strip record's indices are relative to its material's block of that vertex
+        // array, and the unit keeps each block's base in a section of its own. Which same-shaped run is THE table answers from
+        // inside this very file: walk every tree once without bases, read the matIdx (header +20) values records name, and take
+        // the first decoded table whose length covers them all — findTerrainMaterialBases does exactly that census. Without a
+        // covering table every chain is read as if it started at vertex 0 (§14's long-edge population).
+        oa::cdc::TerrainMaterialList materials;
+        bool haveMaterials = false;
+        std::size_t materialSection = 0u;
+        {
+            std::string why;
+            if (oa::cdc::findTerrainMaterialBases(drm, 0u, &materials, &materialSection, &why)) {
+                haveMaterials = true;
+                std::vector<std::uint32_t> distinct(materials.vertexBase);
+                distinct.erase(std::unique(distinct.begin(), distinct.end()), distinct.end());
+                std::fprintf(stderr, "section %zu: %zu material bases over", materialSection, materials.vertexBase.size());
+                for (const std::uint32_t b : distinct) std::fprintf(stderr, " %u", b);
+                std::fputc('\n', stderr);
+            } else {
+                std::fprintf(stderr, "%s\n", why.c_str());   // §20: some units hold no table at all; chains then read absolute (§13)
+            }
+        }
+
         std::vector<bool> referenced(vertexCount, false);
         std::uint32_t referencedCount = 0;
         std::size_t trees = 0;
@@ -495,20 +517,22 @@ int main(int argc, char** argv) {
                 headsPerSection[leaf.targetSection].push_back(leaf.offsetInTarget);
             }
             std::vector<std::uint32_t> tris;
-            std::uint32_t records = 0, heads = 0, badHeads = 0, brokenLinks = 0;
+            std::uint32_t records = 0, heads = 0, badHeads = 0, brokenLinks = 0, unknownMaterials = 0;
             std::uint32_t low = vertexCount, high = 0u;
             for (const auto& entry : headsPerSection) {
                 const auto& strip = drm.sections()[entry.first];
                 if (!strip.stored) continue;
                 oa::cdc::TerrainStripChain walked;
                 std::string chainError;
-                if (!oa::cdc::decodeTerrainStripChains(drm.payload(strip), entry.second, vertexCount, &walked,
-                                                       &chainError)) {
+                if (!oa::cdc::decodeTerrainStripChains(
+                        drm.payload(strip), entry.second, vertexCount, &walked, &chainError,
+                        haveMaterials ? std::span<const std::uint32_t>(materials.vertexBase)
+                                      : std::span<const std::uint32_t>{})) {
                     std::fprintf(stderr, "section %-4u: chain walk skipped (%s)\n", entry.first, chainError.c_str());
                     continue;
                 }
                 records += walked.records; heads += walked.heads; badHeads += walked.badHeads;
-                brokenLinks += walked.brokenLinks;
+                brokenLinks += walked.brokenLinks; unknownMaterials += walked.unknownMaterials;
                 tris.insert(tris.end(), walked.indices.begin(), walked.indices.end());
             }
             std::vector<double> edges;
@@ -526,9 +550,10 @@ int main(int argc, char** argv) {
             std::size_t longEdges = 0;
             for (double e : edges) if (e > 2000.0) ++longEdges;
             std::printf("section %-4zu nodes=%-5u leaves=%-5u depth=%-3u | chains: heads=%-5u records=%-5u badHeads=%-3u "
-                        "broken=%-3u | tris=%-7zu idx %6u..%6u edge p50=%6.0f p99=%7.0f max=%8.0f over2000=%.2f%%\n",
+                        "broken=%-3u unknown=%-4u | tris=%-7zu idx %6u..%6u edge p50=%6.0f p99=%7.0f max=%8.0f "
+                        "over2000=%.2f%%\n",
                         i, static_cast<unsigned>(tree.nodes), static_cast<unsigned>(tree.leaves),
-                        static_cast<unsigned>(tree.maxDepth), heads, records, badHeads, brokenLinks,
+                        static_cast<unsigned>(tree.maxDepth), heads, records, badHeads, brokenLinks, unknownMaterials,
                         tris.size() / 3u, low, high, percentile(0.5), percentile(0.99),
                         edges.empty() ? 0.0 : edges.back(),
                         edges.empty() ? 0.0 : 100.0 * static_cast<double>(longEdges) / static_cast<double>(edges.size()));
