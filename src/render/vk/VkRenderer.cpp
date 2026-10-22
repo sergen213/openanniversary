@@ -1059,28 +1059,42 @@ void VkRenderer::destroyTexture() {
     textureMipLevels_ = 0;
 }
 
-bool VkRenderer::uploadTexture(const TextureUpload& texture, std::string* error) {
+// Uploads one texture's whole mip chain to a fresh image + view: validation, staging copies, per-level
+// vkCmdCopyBufferToImage, layout transitions, and view — exactly what both the textured-quad path (uploadTexture)
+// and each terrain material page (uploadMesh) need, kept here once. The caller owns the output handles;
+// on failure they are VK_NULL_HANDLE and nothing stays allocated.
+bool VkRenderer::uploadSampledImage(const TextureUpload& texture, VkImage* image, VkDeviceMemory* memory,
+                                     VkImageView* view, std::string* error) {
     if (device_ == VK_NULL_HANDLE) {
         if (error != nullptr) *error = "renderer not initialised";
         return false;
     }
     if (texture.format == VK_FORMAT_UNDEFINED || texture.width == 0u || texture.height == 0u ||
         texture.bytes == nullptr || texture.mipLevels == 0u || texture.levels.size() != texture.mipLevels) {
-        if (error != nullptr) *error = "uploadTexture: incomplete texture description";
+        if (error != nullptr) *error = "uploadSampledImage: incomplete texture description";
         return false;
     }
     std::uint64_t covered = 0;
     for (const TextureUpload::Level& level : texture.levels) covered += level.bytes;
     if (covered != texture.byteSize) {
         if (error != nullptr) {
-            *error = "uploadTexture: levels cover " + std::to_string(covered) + " bytes, payload is " +
+            *error = "uploadSampledImage: levels cover " + std::to_string(covered) + " bytes, payload is " +
                      std::to_string(texture.byteSize);
         }
         return false;
     }
 
-    vkDeviceWaitIdle(device_);
-    destroyTexture();
+    VkImage& imageOut = *image;
+    VkDeviceMemory& memOut = *memory;
+    VkImageView& viewOut = *view;
+    const auto releaseImage = [&]() {
+        if (viewOut != VK_NULL_HANDLE) vkDestroyImageView(device_, viewOut, nullptr);
+        if (memOut != VK_NULL_HANDLE) vkFreeMemory(device_, memOut, nullptr);
+        if (imageOut != VK_NULL_HANDLE) vkDestroyImage(device_, imageOut, nullptr);
+        viewOut = VK_NULL_HANDLE;
+        memOut = VK_NULL_HANDLE;
+        imageOut = VK_NULL_HANDLE;
+    };
 
     VkBufferCreateInfo stagingInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     stagingInfo.size = texture.byteSize;
@@ -1130,23 +1144,23 @@ bool VkRenderer::uploadTexture(const TextureUpload& texture, std::string* error)
     imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
     imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    if (!check(vkCreateImage(device_, &imageInfo, nullptr, &texture_), "texture vkCreateImage", error)) {
+    if (!check(vkCreateImage(device_, &imageInfo, nullptr, &imageOut), "texture vkCreateImage", error)) {
         releaseStaging();
         return false;
     }
-    vkGetImageMemoryRequirements(device_, texture_, &requirements);
+    vkGetImageMemoryRequirements(device_, imageOut, &requirements);
     const uint32_t deviceLocal =
         findMemoryType(physical_, requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     allocate = VkMemoryAllocateInfo{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
     allocate.allocationSize = requirements.size;
     allocate.memoryTypeIndex = deviceLocal == 0xFFFFFFFFu ? 0 : deviceLocal;
-    if (!check(vkAllocateMemory(device_, &allocate, nullptr, &textureMemory_), "texture vkAllocateMemory", error)) {
-        destroyTexture();
+    if (!check(vkAllocateMemory(device_, &allocate, nullptr, &memOut), "texture vkAllocateMemory", error)) {
+        releaseImage();
         releaseStaging();
         return false;
     }
-    if (!check(vkBindImageMemory(device_, texture_, textureMemory_, 0), "texture vkBindImageMemory", error)) {
-        destroyTexture();
+    if (!check(vkBindImageMemory(device_, imageOut, memOut, 0), "texture vkBindImageMemory", error)) {
+        releaseImage();
         releaseStaging();
         return false;
     }
@@ -1158,14 +1172,14 @@ bool VkRenderer::uploadTexture(const TextureUpload& texture, std::string* error)
     VkCommandBuffer command = nullptr;
     if (!check(vkAllocateCommandBuffers(device_, &commandAllocate, &command), "texture allocate command buffer",
                error)) {
-        destroyTexture();
+        releaseImage();
         releaseStaging();
         return false;
     }
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     if (!check(vkBeginCommandBuffer(command, &begin), "texture vkBeginCommandBuffer", error)) {
-        destroyTexture();
+        releaseImage();
         releaseStaging();
         return false;
     }
@@ -1178,7 +1192,7 @@ bool VkRenderer::uploadTexture(const TextureUpload& texture, std::string* error)
     toTransferDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     toTransferDst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     toTransferDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    toTransferDst.image = texture_;
+    toTransferDst.image = imageOut;
     toTransferDst.subresourceRange = range;
     vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
                          nullptr, 1, &toTransferDst);
@@ -1187,26 +1201,26 @@ bool VkRenderer::uploadTexture(const TextureUpload& texture, std::string* error)
                                        VkImageSubresourceLayers{VK_IMAGE_ASPECT_COLOR_BIT, level, 0, 1},
                                        VkOffset3D{0, 0, 0},
                                        VkExtent3D{std::max(1u, texture.width >> level), std::max(1u, texture.height >> level), 1}};
-        vkCmdCopyBufferToImage(command, staging, texture_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+        vkCmdCopyBufferToImage(command, staging, imageOut, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
     }
     VkImageMemoryBarrier toSampled{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     toSampled.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     toSampled.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
     toSampled.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     toSampled.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    toSampled.image = texture_;
+    toSampled.image = imageOut;
     toSampled.subresourceRange = range;
     vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr,
                          0, nullptr, 1, &toSampled);
     if (!check(vkEndCommandBuffer(command), "texture vkEndCommandBuffer", error)) {
-        destroyTexture();
+        releaseImage();
         releaseStaging();
         return false;
     }
     VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     VkFence fence = VK_NULL_HANDLE;
     if (!check(vkCreateFence(device_, &fenceInfo, nullptr, &fence), "texture vkCreateFence", error)) {
-        destroyTexture();
+        releaseImage();
         releaseStaging();
         return false;
     }
@@ -1218,19 +1232,32 @@ bool VkRenderer::uploadTexture(const TextureUpload& texture, std::string* error)
     vkDestroyFence(device_, fence, nullptr);
     releaseStaging();
     if (!check(result, "texture upload submit", error)) {
-        destroyTexture();
+        releaseImage();
         return false;
     }
 
     VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-    viewInfo.image = texture_;
+    viewInfo.image = imageOut;
     viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
     viewInfo.format = texture.format;
     viewInfo.subresourceRange = range;
-    if (!check(vkCreateImageView(device_, &viewInfo, nullptr, &textureView_), "texture vkCreateImageView", error)) {
-        destroyTexture();
+    if (!check(vkCreateImageView(device_, &viewInfo, nullptr, &viewOut), "texture vkCreateImageView", error)) {
+        releaseImage();
         return false;
     }
+    if (error != nullptr) error->clear();
+    return true;
+}
+
+bool VkRenderer::uploadTexture(const TextureUpload& texture, std::string* error) {
+    if (device_ == VK_NULL_HANDLE) {
+        if (error != nullptr) *error = "renderer not initialised";
+        return false;
+    }
+    vkDeviceWaitIdle(device_);
+    destroyTexture();
+    if (!uploadSampledImage(texture, &texture_, &textureMemory_, &textureView_, error)) return false;
+
     VkSamplerCreateInfo samplerInfo{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
     samplerInfo.magFilter = VK_FILTER_LINEAR;
     samplerInfo.minFilter = VK_FILTER_LINEAR;
@@ -1615,9 +1642,23 @@ bool VkRenderer::createMeshPipeline(std::string* error) {
         return false;
     }
 
-    // The whole interface is one 4x4 matrix: no descriptor set, so this layout belongs to the mesh pipeline alone.
+    // The interface is a 4x4 matrix plus one page per draw: a combined image sampler at binding 0, so each
+    // material run can bind its own page (docs/formats/GEOMETRY.md §23; white when a material names none).
+    if (meshSetLayout_ == VK_NULL_HANDLE) {
+        const VkDescriptorSetLayoutBinding binding{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
+                                                   VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+        VkDescriptorSetLayoutCreateInfo setLayoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        setLayoutInfo.bindingCount = 1;
+        setLayoutInfo.pBindings = &binding;
+        if (!check(vkCreateDescriptorSetLayout(device_, &setLayoutInfo, nullptr, &meshSetLayout_),
+                   "vkCreateDescriptorSetLayout mesh", error)) {
+            return false;
+        }
+    }
     const VkPushConstantRange pushRange{VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(float) * 16u};
     VkPipelineLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    layoutInfo.setLayoutCount = 1;
+    layoutInfo.pSetLayouts = &meshSetLayout_;
     layoutInfo.pushConstantRangeCount = 1;
     layoutInfo.pPushConstantRanges = &pushRange;
     if (!check(vkCreatePipelineLayout(device_, &layoutInfo, nullptr, &meshLayout_), "vkCreatePipelineLayout mesh",
@@ -1634,18 +1675,19 @@ bool VkRenderer::createMeshPipeline(std::string* error) {
                                         VK_SHADER_STAGE_FRAGMENT_BIT, fragModule, "main", nullptr},
     };
     // The record layout the archive stores (docs/formats/GEOMETRY.md §2): position i16x3 at +0, four colour bytes at
-    // +8. Kept here rather than pulled from the parser header so oa_render stays independent of oa_cdc.
+    // +8, and the two UV shorts at +12 that §2's community-reader note puts at 1/4096 fixed point.
     constexpr std::size_t kRecordBytes = 20;
     const VkVertexInputBindingDescription binding{0, static_cast<std::uint32_t>(kRecordBytes),
                                                   VK_VERTEX_INPUT_RATE_VERTEX};
-    const VkVertexInputAttributeDescription attributes[2] = {
+    const VkVertexInputAttributeDescription attributes[3] = {
         VkVertexInputAttributeDescription{0, 0, VK_FORMAT_R16G16B16_SINT, 0},
         VkVertexInputAttributeDescription{1, 0, VK_FORMAT_R8G8B8A8_UNORM, 8},
+        VkVertexInputAttributeDescription{2, 0, VK_FORMAT_R16G16_SINT, 12},
     };
     VkPipelineVertexInputStateCreateInfo vertexInput{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
     vertexInput.vertexBindingDescriptionCount = 1;
     vertexInput.pVertexBindingDescriptions = &binding;
-    vertexInput.vertexAttributeDescriptionCount = 2;
+    vertexInput.vertexAttributeDescriptionCount = 3;
     vertexInput.pVertexAttributeDescriptions = attributes;
 
     VkPipelineInputAssemblyStateCreateInfo inputAssembly{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
@@ -1709,7 +1751,29 @@ bool VkRenderer::createMeshPipeline(std::string* error) {
     return true;
 }
 
+void VkRenderer::destroyMeshMaterials() {
+    if (device_ == VK_NULL_HANDLE) return;
+    for (MeshMaterial& material : meshMaterials_) {
+        if (material.image != VK_NULL_HANDLE) vkDestroyImage(device_, material.image, nullptr);
+        if (material.view != VK_NULL_HANDLE) vkDestroyImageView(device_, material.view, nullptr);
+        if (material.memory != VK_NULL_HANDLE) vkFreeMemory(device_, material.memory, nullptr);
+    }
+    meshMaterials_.clear();
+    if (meshWhite_.image != VK_NULL_HANDLE) vkDestroyImage(device_, meshWhite_.image, nullptr);
+    if (meshWhite_.view != VK_NULL_HANDLE) vkDestroyImageView(device_, meshWhite_.view, nullptr);
+    if (meshWhite_.memory != VK_NULL_HANDLE) vkFreeMemory(device_, meshWhite_.memory, nullptr);
+    meshWhite_ = MeshMaterial{};
+    if (meshPool_ != VK_NULL_HANDLE) vkDestroyDescriptorPool(device_, meshPool_, nullptr);   // frees the sets too
+    meshPool_ = VK_NULL_HANDLE;
+    if (meshSetLayout_ != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(device_, meshSetLayout_, nullptr);
+    meshSetLayout_ = VK_NULL_HANDLE;
+    if (meshSampler_ != VK_NULL_HANDLE) vkDestroySampler(device_, meshSampler_, nullptr);
+    meshSampler_ = VK_NULL_HANDLE;
+    meshBatches_.clear();
+}
+
 void VkRenderer::destroyMeshPipeline() {
+    destroyMeshMaterials();   // pages, sampler, and the set pool leave with the pipeline they belong to
     if (meshPipeline_ != VK_NULL_HANDLE && device_ != VK_NULL_HANDLE) vkDestroyPipeline(device_, meshPipeline_, nullptr);
     meshPipeline_ = VK_NULL_HANDLE;
     if (meshLayout_ != VK_NULL_HANDLE && device_ != VK_NULL_HANDLE) {
@@ -1723,8 +1787,30 @@ void VkRenderer::drawMeshGeometry(VkCommandBuffer command) const {
     const VkDeviceSize bufferOffset = 0;
     vkCmdBindVertexBuffers(command, 0, 1, &meshBuffer_, &bufferOffset);
     pushMeshMatrix(command);
+    // The shader always samples a page, so every mesh draw binds one: a material's own page for its run, the
+    // white 1x1 otherwise (multiplying by white keeps the shipped vertex colours byte-identical).
+    const auto bindPage = [&](const MeshBatch& batch) {
+        const VkDescriptorSet set = batch.material == kNoTexture || static_cast<std::size_t>(batch.material) >= meshMaterials_.size()
+                                      ? meshWhite_.set
+                                      : meshMaterials_[batch.material].set;
+        vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, meshLayout_, 0, 1, &set, 0, nullptr);
+    };
     if (meshIndexCount_ != 0) {
         vkCmdBindIndexBuffer(command, meshIndexBuffer_, 0, VK_INDEX_TYPE_UINT32);
+        if (!meshBatches_.empty()) {
+            // One draw per material run, each bound to that material's page: the first experiment in
+            // docs/formats/GEOMETRY.md §23, where a class-32 material's +12 names its page by section id.
+            for (const MeshBatch& batch : meshBatches_) {
+                bindPage(batch);
+                vkCmdDrawIndexed(command, batch.indexCount, 1, 0, batch.indexStart, 0);
+            }
+            return;
+        }
+    }
+    // The unbatched fallbacks bind white: indexed runs (the old single draw) and unindexed runs alike.
+    vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, meshLayout_, 0, 1, &meshWhite_.set,
+                            0, nullptr);
+    if (meshIndexCount_ != 0) {
         vkCmdDrawIndexed(command, meshIndexCount_, 1, 0, 0, 0);
     } else {
         vkCmdDraw(command, meshVertexCount_, 1, 0, 0);
@@ -1739,6 +1825,32 @@ bool VkRenderer::uploadMesh(const MeshUpload& mesh, std::string* error) {
     if (mesh.bytes == nullptr || mesh.vertexCount < 3u) {
         if (error != nullptr) *error = "a triangle run needs at least three vertices";
         return false;
+    }
+    // Per-material runs (docs/formats/GEOMETRY.md §23): the ranges must be whole triangles, ascending and
+    // non-overlapping, inside the index list, and name a material entry or kNoTexture. Uncovered indices are
+    // simply not drawn — the caller is expected to group all of them, and this stays honest about what it does.
+    std::uint32_t coveredByBatches = 0u;
+    if (!mesh.batches.empty()) {
+        if (mesh.indices == nullptr || mesh.indices->empty()) {
+            if (error != nullptr) *error = "material batches need an index list to range over";
+            return false;
+        }
+        for (const MeshBatch& batch : mesh.batches) {
+            if (batch.indexCount == 0u || batch.indexCount % 3u != 0u) {
+                if (error != nullptr) *error = "a material run holds whole triangles";
+                return false;
+            }
+            if (batch.indexStart < coveredByBatches ||
+                static_cast<std::uint64_t>(batch.indexStart) + batch.indexCount > mesh.indices->size()) {
+                if (error != nullptr) *error = "material batches must be ascending, non-overlapping, inside the index list";
+                return false;
+            }
+            coveredByBatches = batch.indexStart + batch.indexCount;
+            if (batch.material != kNoTexture && static_cast<std::size_t>(batch.material) >= mesh.materials.size()) {
+                if (error != nullptr) *error = "a batch names no material entry";
+                return false;
+            }
+        }
     }
     const bool indexed = mesh.indices != nullptr && !mesh.indices->empty();
     if (indexed) {
@@ -1819,6 +1931,74 @@ bool VkRenderer::uploadMesh(const MeshUpload& mesh, std::string* error) {
         }
         std::memcpy(indexMapped, mesh.indices->data(), indexBytes);
         vkUnmapMemory(device_, meshIndexMemory_);
+    }
+
+    // Every mesh draw samples a page, so give it one: a white 1x1 bound whenever a batch names no page
+    // (multiplying by linear white keeps the shipped vertex colours byte-identical), plus one real page per
+    // material entry — a page that fails to upload fails the whole upload rather than quietly going colour-only
+    // (docs/formats/GEOMETRY.md §23).
+    {
+        VkSamplerCreateInfo meshSamplerInfo{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+        meshSamplerInfo.magFilter = VK_FILTER_LINEAR;
+        meshSamplerInfo.minFilter = VK_FILTER_LINEAR;
+        meshSamplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        // Terrain UVs tile past one page: a boundary is where the next tile of the same page continues, so
+        // wrap, not the clamp the full-image quad path wants.
+        meshSamplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        meshSamplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        if (!check(vkCreateSampler(device_, &meshSamplerInfo, nullptr, &meshSampler_), "mesh vkCreateSampler", error))
+            return false;
+    }
+    const VkDescriptorPoolSize meshPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                                            static_cast<uint32_t>(mesh.materials.size() + 2u)};   // descriptorCount is the pool total, not per set
+    VkDescriptorPoolCreateInfo meshPoolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    meshPoolInfo.maxSets = static_cast<uint32_t>(mesh.materials.size() + 2u);   // one set per page plus white, plus headroom — the driver refuses pools sized exactly at the boundary
+    meshPoolInfo.poolSizeCount = 1;
+    meshPoolInfo.pPoolSizes = &meshPoolSize;
+    if (!check(vkCreateDescriptorPool(device_, &meshPoolInfo, nullptr, &meshPool_), "mesh vkCreateDescriptorPool",
+               error)) {
+        return false;
+    }
+    const auto addPage = [&](const TextureUpload& page, MeshMaterial& material) -> bool {
+        if (!uploadSampledImage(page, &material.image, &material.memory, &material.view, error)) return false;
+        VkDescriptorSetAllocateInfo setAllocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        setAllocate.descriptorPool = meshPool_;
+        setAllocate.descriptorSetCount = 1;
+        setAllocate.pSetLayouts = &meshSetLayout_;
+        if (!check(vkAllocateDescriptorSets(device_, &setAllocate, &material.set), "mesh vkAllocateDescriptorSets",
+                   error)) {
+            return false;
+        }
+        const VkDescriptorImageInfo described{meshSampler_, material.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        write.dstSet = material.set;
+        write.dstBinding = 0;
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        write.pImageInfo = &described;
+        vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
+        return true;
+    };
+    const std::array<std::uint8_t, 4> kWhiteByte{255u, 255u, 255u, 255u};   // linear white: multiplying changes nothing
+    TextureUpload white;
+    white.format = VK_FORMAT_B8G8R8A8_SRGB;   // every byte 0xFF: the order is moot and 0xFF decodes to exactly 1.0
+    white.width = white.height = 1u;
+    white.mipLevels = 1u;
+    white.levels.push_back(TextureUpload::Level{0u, 4u});
+    white.bytes = kWhiteByte.data();
+    white.byteSize = 4u;
+    if (!addPage(white, meshWhite_)) return false;
+    meshMaterials_.clear();
+    meshMaterials_.reserve(mesh.materials.size());
+    for (const TextureUpload& page : mesh.materials) {
+        MeshMaterial material;
+        if (!addPage(page, material)) return false;
+        meshMaterials_.push_back(material);
+    }
+    meshBatches_ = mesh.batches;
+    if (!meshBatches_.empty()) {
+        OA_LOG(LogLevel::Info, "vk", "mesh materials uploaded: {} page(s) for {} batch(es), white-bound batches draw colours alone",
+               meshMaterials_.size(), meshBatches_.size());
     }
 
     // The camera fits itself to these, so the archive's own numbers are what decide how big the level looks.

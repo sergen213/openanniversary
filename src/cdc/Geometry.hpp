@@ -133,6 +133,11 @@ bool decodeTerrainStripChains(std::span<const std::byte> payload, std::span<cons
 // four of the five blocks - so all 2,339 records fit without a single overflow [V-data].
 struct TerrainMaterialList {
     std::vector<std::uint32_t> vertexBase;   // one base per material, file order = matIdx
+    // The raw word at record +12, kept as the (class << 16 | value) pair §21 measured. Class 32's value names the
+    // unit section index holding that material's texture page (160 of 172 records across both probe units); other
+    // classes name ids in a second namespace that is neither the directory nor the object list. Nothing here decides
+    // what a class means - the caller checks before it looks anything up.
+    std::vector<std::uint32_t> classValue;
 };
 
 // Reads that table from one section payload. Refuses rather than guesses: fewer than eight relocation slots at a stride

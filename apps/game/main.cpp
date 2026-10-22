@@ -38,6 +38,17 @@ oa::LogLevel levelFromName(const std::string& name) {
 
 }  // namespace
 
+// The one place that maps a PCD9 tag to the Vulkan format carrying its shipped bytes: shared by the
+// --texture quad path and the terrain material pages of --textures (docs/formats/TEXTURES.md).
+static VkFormat pcd9VkFormat(const oa::cdc::Pcd9Info& info) {
+    switch (info.tag) {
+        case static_cast<std::uint32_t>(oa::cdc::Pcd9Format::Dxt1): return VK_FORMAT_BC1_RGBA_SRGB_BLOCK;
+        case static_cast<std::uint32_t>(oa::cdc::Pcd9Format::Dxt5): return VK_FORMAT_BC3_SRGB_BLOCK;
+        case static_cast<std::uint32_t>(oa::cdc::Pcd9Format::Uncompressed32): return VK_FORMAT_B8G8R8A8_SRGB;
+        default: return VK_FORMAT_UNDEFINED;
+    }
+}
+
 int main(int argc, char** argv) {
     oa::Config config;
     config.setDefault("title", "OpenAnniversary");
@@ -181,15 +192,8 @@ int main(int argc, char** argv) {
 
         // The stored bytes are already sRGB-encoded, and the swapchain attachment is B8G8R8A8_SRGB, so sampling has to
         // decode (SRGB formats) for the hardware encode on write to land back on the shipped colours.
-        VkFormat format = VK_FORMAT_UNDEFINED;
-        if (info.tag == static_cast<std::uint32_t>(oa::cdc::Pcd9Format::Dxt1)) {
-            format = VK_FORMAT_BC1_RGBA_SRGB_BLOCK;
-        } else if (info.tag == static_cast<std::uint32_t>(oa::cdc::Pcd9Format::Dxt5)) {
-            format = VK_FORMAT_BC3_SRGB_BLOCK;
-        } else if (info.tag == static_cast<std::uint32_t>(oa::cdc::Pcd9Format::Uncompressed32)) {
-            // Masks are white with their shape in alpha, which the blend state then uses directly.
-            format = VK_FORMAT_B8G8R8A8_SRGB;
-        } else {
+        const VkFormat format = pcd9VkFormat(info);
+        if (format == VK_FORMAT_UNDEFINED) {
             OA_LOG(oa::LogLevel::Error, "app", "PCD9 tag {} has no Vulkan format yet", info.tag);
             return 2;
         }
@@ -316,6 +320,15 @@ int main(int argc, char** argv) {
         // record instead of guessing where records start: with the section numbering Drm.hpp documents, all 1,620 leaf
         // references of this unit land on a record header (docs/formats/GEOMETRY.md §15). Culling is not applied yet, so
         // whole chains are drawn rather than the cells a camera would see.
+        // --textures=true binds each walked chain's material to the texture page its +12 word names
+        // (docs/formats/GEOMETRY.md §23, Milestone 4's experiment a): material indices ride the gated
+        // triangles as drawMaterials, and after the walk they are grouped per material against the base
+        // table's class/value words — one contiguous index run per material, one page per run.
+        const bool wantTextures = config.flag("textures", false);
+        std::vector<std::int32_t> drawMaterials;   // one matIdx per triangle in drawIndices
+        std::vector<std::uint32_t> groupedIndices; // drawIndices reordered into per-material runs
+        std::vector<oa::render::MeshBatch> materialBatches;
+        std::vector<oa::render::TextureUpload> materialPages;
         std::vector<std::uint32_t> stripIndices;
         std::vector<std::uint32_t> drawIndices;   // the gated copy handed to the GPU
         std::uint32_t coarseTriangles = 0;
@@ -388,6 +401,8 @@ int main(int argc, char** argv) {
                         stripIndices.insert(stripIndices.end(), {walked.indices[t], walked.indices[t + 1u], walked.indices[t + 2u]});
                         if (!(low > 1.0 && high < kMaxEdgeSquared)) { ++coarseTriangles; continue; }
                         drawIndices.insert(drawIndices.end(), {walked.indices[t], walked.indices[t + 1u], walked.indices[t + 2u]});
+                        drawMaterials.push_back(t / 3u < walked.materialOfTriangle.size()   // §10: the matIdx rides each chain record
+                                                ? walked.materialOfTriangle[t / 3u] : -1);
                     }
                 }
             }
@@ -396,6 +411,81 @@ int main(int argc, char** argv) {
                                               "{} bad head(s), {} broken link(s))",
                    trees, heads, records, drawIndices.size() / 3u, stripIndices.size() / 3u,
                    vertices.size(), coarseTriangles, badHeads, brokenLinks);
+            if (wantTextures) {
+                if (!haveMaterials) {
+                    OA_LOG(oa::LogLevel::Error, "app", "--textures needs the material base table: {}", tableError);
+                    return 2;
+                }
+                // Group the gated triangles by material so each material gets one contiguous index run and one
+                // bound page. §21: a class-32 material's +12 low half names the unit section holding its PCD9
+                // page; any other class, an out-of-range id, or a section that is not a decodable PCD9 keeps
+                // kNoTexture — that run draws the shipped vertex colours alone, with no guessing.
+                std::map<std::int32_t, std::vector<std::uint32_t>> runs;
+                for (std::size_t tri = 0; tri < drawMaterials.size(); ++tri) {
+                    const auto material = drawMaterials[tri];
+                    if (material < 0 || static_cast<std::size_t>(material) >= materials.classValue.size()) {
+                        OA_LOG(oa::LogLevel::Error, "app", "--textures: a chain names material {} outside the base table's {} entries", material, materials.classValue.size());
+                        return 2;
+                    }
+                    for (int k = 0; k < 3; ++k) {
+                        runs[material].push_back(drawIndices[3u * tri + static_cast<std::size_t>(k)]);
+                    }
+                }
+                std::map<std::uint32_t, std::uint32_t> pageById;   // section index -> index into materialPages, deduped
+                // §21 measured the id space: class 32's value matches the *id field* of this unit's type-5 (texture
+                // page) sections — a different namespace from the directory index, so map it before use.
+                std::map<std::uint32_t, std::size_t> pageSlot;
+                for (std::size_t s = 0; s < drm.sections().size(); ++s) {
+                    const oa::cdc::DrmSection& sec = drm.sections()[s];
+                    if (sec.stored && sec.type == 5) pageSlot[sec.id] = s;
+                }
+                for (const auto& entry : runs) {
+                    oa::render::MeshBatch batch;   // defaults: no page bound (white, colours only)
+                    batch.indexStart = static_cast<std::uint32_t>(groupedIndices.size());
+                    batch.indexCount = static_cast<std::uint32_t>(entry.second.size());
+                    const std::uint32_t packed = materials.classValue[static_cast<std::size_t>(entry.first)];
+                    const uint32_t idClass = packed >> 16u, pageId = packed & 0xFFFFu;
+                    if (idClass == 32u) {   // §21: class 32 names the texture page; other classes stay open
+                        const auto named = pageSlot.find(pageId);
+                        if (named == pageSlot.end()) {
+                            OA_LOG(oa::LogLevel::Warn, "app", "--textures: material {} names page id {}, which matches no stored type-5 section of this unit", entry.first, pageId);
+                        } else {
+                            auto known = pageById.find(static_cast<std::uint32_t>(named->second));
+                            if (known == pageById.end()) {
+                                oa::cdc::Pcd9Info page;
+                                std::string why;
+                                const std::span<const std::byte> pageBytes = drm.payload(drm.sections()[named->second]);
+                                if (oa::cdc::parsePcd9(pageBytes, &page, &why)) {
+                                    oa::render::TextureUpload upload;
+                                    upload.format = pcd9VkFormat(page);
+                                    if (upload.format == VK_FORMAT_UNDEFINED) {
+                                        OA_LOG(oa::LogLevel::Warn, "app", "--textures: material {}'s page (section {}) has PCD9 tag {}, which has no Vulkan format", entry.first, named->second, page.tag);
+                                    } else {
+                                        upload.width = page.width;
+                                        upload.height = page.height;
+                                        upload.mipLevels = page.mipLevels;
+                                        upload.bytes = pageBytes.data() + oa::cdc::kPcd9HeaderBytes;
+                                        upload.byteSize = page.payloadBytes;
+                                        for (const oa::cdc::Pcd9LevelRegion& region : oa::cdc::pcd9LevelRegions(page)) {
+                                            upload.levels.push_back(oa::render::TextureUpload::Level{region.offset, region.bytes});
+                                        }
+                                        pageById[static_cast<std::uint32_t>(named->second)] = static_cast<std::uint32_t>(materialPages.size());
+                                        materialPages.push_back(std::move(upload));
+                                        known = pageById.find(static_cast<std::uint32_t>(named->second));
+                                    }
+                                } else {
+                                    OA_LOG(oa::LogLevel::Warn, "app", "--textures: material {}'s id {} resolves to section {}, which is not a decodable PCD9: {}", entry.first, pageId, named->second, why);
+                                }
+                            }
+                            if (known != pageById.end()) batch.material = known->second;
+                        }
+                    }
+                    groupedIndices.insert(groupedIndices.end(), entry.second.begin(), entry.second.end());
+                    materialBatches.push_back(batch);
+                }
+                OA_LOG(oa::LogLevel::Info, "app", "--textures: {} material(s) grouped into {} batch(es) over {} distinct PCD9 page(s) from named sections",
+                       runs.size(), materialBatches.size(), materialPages.size());
+            }
         }
 
         // --avatar=true answers for the foot with a column query over the strip records that survived the gate. The older
@@ -744,6 +834,11 @@ int main(int argc, char** argv) {
         }
         // The gated copy is what goes to the GPU and into the terrain grid --avatar=true probes (see above).
         mesh.indices = drawIndices.empty() ? nullptr : &drawIndices;
+        if (!groupedIndices.empty()) {   // --textures: the per-material runs replace the single index draw
+            mesh.indices = &groupedIndices;
+            mesh.materials = std::move(materialPages);
+            mesh.batches = std::move(materialBatches);
+        }
         if (!renderer.uploadMesh(mesh, &error)) {
             OA_LOG(oa::LogLevel::Error, "app", "cannot upload the triangle run: {}", error);
             return 2;
@@ -816,10 +911,16 @@ int main(int argc, char** argv) {
                 OA_LOG(oa::LogLevel::Error, "app", "mesh probe failed: {}", error);
                 return 2;
             }
+            // With page bound the lit pixels are page-modulated shipped colours, which no offline byte set can
+            // pre-enumerate: the textured probe stays coverage-only, and the exact colour assertion below stays
+            // exactly the old check when nothing is bound.
+            const bool textured = !groupedIndices.empty();
             std::set<std::uint32_t> shipped;
-            for (const oa::cdc::MeshVertex& v : vertices) {
-                shipped.insert((static_cast<std::uint32_t>(v.red) << 16) | (static_cast<std::uint32_t>(v.green) << 8) |
-                               v.blue);
+            if (!textured) {
+                for (const oa::cdc::MeshVertex& v : vertices) {
+                    shipped.insert((static_cast<std::uint32_t>(v.red) << 16) | (static_cast<std::uint32_t>(v.green) << 8) |
+                                   v.blue);
+                }
             }
             std::size_t lit = 0, unexpected = 0;
             for (std::uint32_t y = 0; y < kProbeSize; ++y) {
@@ -832,7 +933,7 @@ int main(int argc, char** argv) {
                     const auto red = static_cast<std::uint32_t>(pixels[at + 2]);
                     if (blue < 8u && green < 8u && red < 8u) continue;  // the transparent clear showing through
                     ++lit;
-                    bool known = false;
+                    bool known = textured;   // modulated pixels are not in the shipped colour set: coverage only
                     for (int dr = -1; dr <= 1 && !known; ++dr) {
                         for (int dg = -1; dg <= 1 && !known; ++dg) {
                             for (int db = -1; db <= 1 && !known; ++db) {

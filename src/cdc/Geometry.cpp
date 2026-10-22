@@ -272,6 +272,7 @@ bool decodeTerrainMaterialBases(std::span<const std::byte> payload, const std::v
             return fail("material bases decrease at " + std::to_string(at));
         }
         list.vertexBase.push_back(base);
+        list.classValue.push_back(loadU32(payload.data() + at + 12u));   // (class << 16 | value), §21; kept raw
     }
     *out = std::move(list);
     if (error != nullptr) error->clear();

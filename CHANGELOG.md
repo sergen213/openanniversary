@@ -118,6 +118,21 @@ zero version and has no releases yet.
   `report.py` summarises a capture while streaming, because a four-minute session writes over a gigabyte of text. The
   measured setup - including that `WINEDLLOVERRIDES="d3d9=n,b"` is required since Wine treats `d3d9` as a builtin - is in
   `docs/ENVIRONMENT.md`; captures and the DXVK backup stay outside the repository.
+- Draw-time texture binding, Milestone 4's first experiment run: `TerrainMaterialList` carries each material record's raw
+  `+12` `(class << 16 | value)` word (`src/cdc/Geometry.*`, test fixture asserts it), and `oa-game --textures=true` groups
+  the gated strip triangles by `matIdx` and resolves each class-32 value to one of the unit's type-5 (texture-page) sections
+  **by the directory's `id` field** - not the index, which resolves none (GEOMETRY.md §23 records both namespaces so neither
+  dead end is retried). Each resolved page decodes through the PCD9 reader and uploads as its own `sampler2D`; the mesh
+  pipeline gains a descriptor-set layout, one set per page plus a white 1x1 fallback (multiplying by linear white keeps the
+  shipped flat colours byte-identical), a wrap sampler (§17's UVs tile past one page), and `drawMeshGeometry` issues one
+  `vkCmdDrawIndexed` per material run bound to that run's page; `shaders/mesh.vert` passes the vertex UV as a third
+  `R16G16_SINT` attribute and `mesh.frag` samples modulated by the vertex colour. Over `4956BEA0` the log answers
+  `136 material(s) grouped into 136 batch(es) over 31 distinct PCD9 page(s)` with three Warns naming the unresolved id
+  9,722; the picture redraws the entrance hall with the surfaces the shipped game puts on the same architecture - block-moss
+  walls, ivy from ceiling edges, planted greenery (comparison in `docs/formats/GEOMETRY.md` §23, capture
+  `openanniversary-work/cap/oa_4956BEA0_tex.bmp`). Two driver facts learned with it, kept as comments where they bite:
+  `VkDescriptorPoolSize.descriptorCount` is a pool total, and a pool sized exactly at the set count answers
+  `VK_ERROR_OUT_OF_POOL_MEMORY`. The colour-only self-check path is unchanged and still answers `0 unexplained`.
 
 ### Verified
 - Per-material base vertex indices exist at draw time, measured inside the shipped process

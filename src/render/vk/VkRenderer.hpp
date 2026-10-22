@@ -18,6 +18,9 @@
 
 namespace oa::render {
 
+// A batch that names no decodable page: bind the white 1x1 and draw the shipped vertex colours alone.
+inline constexpr std::uint32_t kNoTexture = 0xFFFFFFFFu;
+
 struct RendererConfig {
     std::string applicationName = "OpenAnniversary";
     bool validation = true;            // VK_LAYER_KHRONOS_validation when the loader offers it
@@ -46,12 +49,22 @@ struct TextureUpload {
 // as they hold, plus the bounds the caller measured so the camera can be fitted without walking them again here.
 // `indices`, when present, draws those vertices as a triangle list (the terrain strips of
 // docs/formats/GEOMETRY.md §9); without it the run is drawn straight, three records per triangle.
+// `materials`/`batches` (docs/formats/GEOMETRY.md §23, Milestone 4's experiment a) split an indexed run into
+// per-material draws, each bound to the texture page that material's +12 word names; a batch marked kNoTexture
+// draws with a white page bound, which keeps the shipped vertex colours byte-identical.
+struct MeshBatch {
+    std::uint32_t indexStart = 0;   // first index of this material's run inside MeshUpload::indices
+    std::uint32_t indexCount = 0;   // whole triangles times three
+    std::uint32_t material = kNoTexture;   // index into MeshUpload::materials
+};
 struct MeshUpload {
     const void* bytes = nullptr;
     std::uint32_t vertexCount = 0;
     const std::vector<std::uint32_t>* indices = nullptr;
     float boundsMin[3] = {0.0f, 0.0f, 0.0f};
     float boundsMax[3] = {0.0f, 0.0f, 0.0f};
+    std::vector<TextureUpload> materials;   // one entry per material used, deduplicated by the caller
+    std::vector<MeshBatch> batches;         // runs of `indices`, ascending and non-overlapping
 };
 
 // Camera for the mesh pass: yaw and pitch in radians around a target, `zoom` scales the fit, `panX/panY/panZ` move that
@@ -124,6 +137,7 @@ public:
     bool hasTexture() const { return texture_ != VK_NULL_HANDLE; }
 
     // Uploads a triangle run and makes it the geometry drawn by subsequent frames, depth-tested against itself.
+    // With batches, each material's run is drawn bound to its own uploaded page.
     bool uploadMesh(const MeshUpload& mesh, std::string* error = nullptr);
     bool hasMesh() const { return meshVertexCount_ != 0; }
     void setMeshCamera(const MeshCamera& camera) { camera_ = camera; }
@@ -161,9 +175,16 @@ private:
     void destroyDepthImage();
     bool createMeshPipeline(std::string* error);
     void destroyMeshPipeline();
+    void destroyMeshMaterials();   // per-upload pages and batches, white fallback included
+    // Uploads one texture's whole mip chain to a fresh image + view: staging copy, barriers, and per-level
+    // vkCmdCopyBufferToImage, exactly as the textured-quad path needs them too. Used by uploadTexture and
+    // uploadMesh; the caller owns the handles it passes in.
+    bool uploadSampledImage(const TextureUpload& texture, VkImage* image, VkDeviceMemory* memory,
+                            VkImageView* view, std::string* error);
     void pushMeshMatrix(VkCommandBuffer command) const;
     // Binds the mesh pipeline plus its vertex (and index, when there is one) buffers and issues the draw; both the
-    // swapchain pass and the offscreen probe call it.
+    // swapchain pass and the offscreen probe call it. With batches, one draw per material run, each with that
+    // material's page bound (white when it names none).
     void drawMeshGeometry(VkCommandBuffer command) const;
 
     static VKAPI_ATTR VkBool32 VKAPI_CALL debugMessenger(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
@@ -214,6 +235,20 @@ private:
     VkBuffer meshIndexBuffer_ = VK_NULL_HANDLE;
     VkDeviceMemory meshIndexMemory_ = VK_NULL_HANDLE;
     std::uint32_t meshIndexCount_ = 0;
+    // The pages one upload asked for, in MeshUpload::materials order, each with its own descriptor set; plus
+    // the white 1x1 bound whenever a batch names no page (docs/formats/GEOMETRY.md §23).
+    struct MeshMaterial {
+        VkImage image = VK_NULL_HANDLE;
+        VkImageView view = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        VkDescriptorSet set = VK_NULL_HANDLE;
+    };
+    std::vector<MeshMaterial> meshMaterials_;
+    MeshMaterial meshWhite_;
+    std::vector<MeshBatch> meshBatches_;
+    VkSampler meshSampler_ = VK_NULL_HANDLE;   // wrapped: terrain UVs tile past one page
+    VkDescriptorSetLayout meshSetLayout_ = VK_NULL_HANDLE;
+    VkDescriptorPool meshPool_ = VK_NULL_HANDLE;
     MeshCamera camera_;
     float meshCentre_[3] = {0.0f, 0.0f, 0.0f};
     float meshRadius_ = 1.0f;

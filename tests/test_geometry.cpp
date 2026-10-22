@@ -371,6 +371,7 @@ TEST(TerrainMaterialBases, readsTheTableInFileOrder) {
     std::string error;
     ASSERT_TRUE(oa::cdc::decodeTerrainMaterialBases(payload, relocs, 5u, &list, &error)) << error;
     EXPECT_EQ(list.vertexBase, (std::vector<std::uint32_t>(bases, bases + 12)));
+    EXPECT_EQ(list.classValue, (std::vector<std::uint32_t>(12u, 7u | (32u << 16u))));   // +12 carried out raw (§21 pair)
 }
 
 TEST(TerrainMaterialBases, refusesPayloadsThatAreNotATable) {

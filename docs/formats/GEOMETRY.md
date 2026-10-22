@@ -724,3 +724,38 @@ are §21's unresolved classes, not the base question; `y` still spans -17,656..1
 is in one vertex array, which the oct-tree (not the grid) is expected to separate. This is §20's claim demonstrated on
 feet rather than on edges: the bases produce continuous, walkable ground in the unit whose draw-time numbers they were
 read from. The coarse-tree remainder of `8baf540e` (§20 open item 3) stays open and is the next geometry question.
+
+## 23. Bind the class-32 page at draw time and this unit's materials redraw with their shipped surfaces: measured [V-data] [V-gpu]
+
+This is §21's parked Milestone-4 experiment (a), run. The renderer now binds one texture page per material at draw
+time: the triangle chains that survive §22's gate are grouped by `matIdx`, each material's `+12` class-32 value
+resolves to that material's own `PCD9` page, uploaded as a `sampler2D` bound to that material's draw; the fragment
+samples with the vertex UV (§17's quarter-unit lattice, wrapped addressing) and multiplies by the shipped flat vertex
+colour. A material whose page does not resolve binds a white 1x1 instead, so its run stays byte-identical to the
+§18/§22 colour-only picture.
+
+1. **Resolution counts on `4956BEA0`, measured [V-data]:** 136 materials have drawn triangles; 133 of them name a
+   page that resolves to one of the unit's 31 distinct type-5 sections; the three that do not all name id 9,722 —
+   §21's unresolved cluster, which starts at 9,466. The values resolve in exactly one namespace: the **`id` field**
+   of the unit's type-5 directory entries (§21 item 2), never the directory index — an index lookup resolves 0 of
+   136, recorded so this dead end is not retried. Reproduce: `oa-game --gameDir="<install>" --mesh=4956BEA0
+   --strips=true --textures=true --selfCheck=false --frames=1` logs `136 material(s) grouped into 136 batch(es)
+   over 31 distinct PCD9 page(s) from named sections` plus one Warn per unresolved material (2026-10-22).
+2. **What the picture says, compared against the shipped game at the same place [V-gpu]:** the dump
+   (`--meshDump=<work-dir>/cap/oa_4956BEA0_tex.bmp`, the whole unit's bounded fragment drawn with its named pages)
+   shows mossy stone blocks, ivy hanging in strands from wall tops, planted greenery, and cut-out foliage with the
+   pages' own alpha shapes. The shipped capture of this hall (`<work-dir>/cap/level.png`, taken under Wine+DXVK from
+   the install's own start room) shows the same surfaces on the same architecture: the identical block-moss pattern
+   on the corridor walls, ivy strips hanging from the ceiling edges, and the same planting at the corridor end.
+   Every drawn surface sits on the geometry the shipped game puts it on; no page lands on a surface it does not
+   belong to. That settles §21's open question for the class-32 namespace: a `matIdx` selects the page its `+12`
+   names, end to end. [V-gpu]
+3. **What was tried and ruled out:** §21 item 3's luma ranking (no signal — recorded there, not rerun); the
+   directory-index namespace (0 of 136, above). Two GPU notes kept so the path does not bite again: `VkDescriptorPoolSize`'s
+   `descriptorCount` is the pool total rather than per set, and a pool sized exactly at the set boundary is refused
+   (`VK_ERROR_OUT_OF_POOL_MEMORY`, `-1000069000`) — headroom over both.
+4. **What stays open:** id 9,722's second namespace (three materials draw colour-only, §21 item (b)); per-face
+   confirmation that one page's boundary ends at a surface edge rather than across a face (surfaces land on the
+   right geometry at a glance; page-to-page seams are not yet checked); wrapped sampling hides a whole-page V-flip
+   at this coverage, so the flip question stays with §17's. The colour-only self-check path is unchanged and still
+   reports `0 unexplained` bytes.
