@@ -161,6 +161,24 @@ typedef HRESULT (METHOD *SetTex_t)(IDirect3DDevice9 *, DWORD, IDirect3DBaseTextu
 static DrawIP_t nxt_DrawIP;
 static SetTex_t nxt_SetTexture;
 
+/* The motion channel (Milestone 5's validation against the original): the matrix setters are exactly the
+ * methods mingw's d3d9 interface header omits around SetViewport, so the real slot is one of a small
+ * window around the header's SetViewport index. Each window slot gets its own shape-correct probe that
+ * logs the 16 floats and forwards unchanged - a mis-shaped slot at worst ignores or reads a garbage
+ * pointer, which disturbs rendering only, never the game logic. The probe that fires every frame with
+ * orthonormal rows names the view (or world-view-projection) matrix; the camera follows the player, so
+ * its translation measures her motion in engine units against the guest clock in ms. */
+typedef HRESULT (METHOD *Probe_t)(IDirect3DDevice9 *, const float *);
+static Probe_t nxt_probe[5];
+#define MKPROBE(k) static HRESULT METHOD probe##k(IDirect3DDevice9 *d, const float *m) \
+{ \
+    logline("probe%d t=%u m=%.7g,%.7g,%.7g,%.7g,%.7g,%.7g,%.7g,%.7g,%.7g,%.7g,%.7g,%.7g,%.7g,%.7g,%.7g,%.7g", \
+            k, (unsigned)GetTickCount(), m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11], \
+            m[12], m[13], m[14], m[15]); \
+    return nxt_probe[k](d, m); \
+}
+MKPROBE(0) MKPROBE(1) MKPROBE(2) MKPROBE(3) MKPROBE(4)
+
 static HRESULT METHOD SetTexture_hook(IDirect3DDevice9 *d, DWORD stage, IDirect3DBaseTexture9 *t)
 {
     logline("SetTexture stage=%u tex=%p", stage, (void *)t);
@@ -195,6 +213,12 @@ static HRESULT METHOD DrawIP_hook(IDirect3DDevice9 *d, D3DPRIMITIVETYPE type, IN
     }
     return nxt_DrawIP(d, type, bvi, minv, numv, starti, prims);
 }
+
+/* The motion channel (Milestone 5's validation against the original): the third view-matrix row is the
+ * camera's world position negated, and the camera follows the player, so consecutive lines measure her
+ * movement in engine units. GetTickCount is the guest clock in ms since start - the engine's frame rate
+ * is not known, so frames alone cannot give units per second. */
+static unsigned logged_view;
 
 /* ------------------------------------------- vertex/index buffer creation and filling
  * The terrain bytes are not available to a probe of our own: those buffers are created WRITEONLY|DYNAMIC (seen in the
@@ -337,6 +361,17 @@ static void patchDevice(IDirect3DDevice9 *dev)
     patch(dev, SLOT(IDirect3DDevice9, SetTexture), SetTexture_hook, (void **)&nxt_SetTexture);
     patch(dev, SLOT(IDirect3DDevice9, CreateVertexBuffer), CreateVB_hook, (void **)&nxt_CreateVB);
     patch(dev, SLOT(IDirect3DDevice9, CreateIndexBuffer), CreateIB_hook, (void **)&nxt_CreateIB);
+    const char *win = getenv("OA_PROBE_SLOT");
+    if (win)
+    {
+        const int window = atoi(win);   // absolute vtbl slot, chosen by the probe runs outside this DLL
+        patch(dev, window, probe0, (void **)&nxt_probe[0]);
+    }
+    else
+    {
+        logline("device %p patched: DrawIP=%d SetTexture=%d", dev,
+                SLOT(IDirect3DDevice9, DrawIndexedPrimitive), SLOT(IDirect3DDevice9, SetTexture));
+    }
     /* Only these two slots are trusted. Patching SLOT(CreateTexture)=23, SLOT(SetFVF)=89 and
      * SLOT(SetMaterial)=49 killed the game at its first Present with "err:seh:NtRaiseException Exception frame is
      * not in stack limits", and those hooks logged impossible arguments - a 6385652x17882624 texture during a
@@ -344,8 +379,6 @@ static void patchDevice(IDirect3DDevice9 *dev)
      * forwarding them with the wrong count unbalances the caller's stack. Slot 82 is confirmed by its own call
      * pattern: type=4 (TRIANGLELIST), starti stepping by 256 within one buffer pair, numv in the tens of
      * thousands for level meshes. */
-    logline("device %p patched: DrawIP=%d SetTexture=%d", dev,
-            SLOT(IDirect3DDevice9, DrawIndexedPrimitive), SLOT(IDirect3DDevice9, SetTexture));
 }
 
 /* ------------------------------------------------------- entry points */

@@ -1,0 +1,17 @@
+# shim.c is a Wine-guest MinGW DLL; its headers live in the cross-toolchain sysroot, which
+# clangd does not know about. Point it there so the real toolchain's view (tools/dxhook/build.sh,
+# i686-w64-mingw32-gcc) is the one the diagnostics agree with. The suppress list covers the
+# include-resolution cascades clangd cannot verify; the compiler that decides correctness is
+# the one build.sh invokes, and it reports zero errors on this file.
+config:
+  compile_flags:
+    - -std=c99
+    - --target=win32
+    - -isystem/usr/i686-w64-mingw32/include
+diagnostics:
+  suppress:
+    - file_not_found
+    - undeclared_id_here_not_declared
+    - undeclared_identifier
+    - unknown_typename
+    - unknown_typename_suggest_declaring_typename
