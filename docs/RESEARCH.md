@@ -199,3 +199,13 @@ The behavior cross-check for the verified traversal (M5) reads `tra.exe` statica
 
 Repro: `openanniversary-work/ghidra/exports/movement-strings-xrefs.tsv` (the ExportXrefs string-scan run above), the two
 decompiled users in `decomp-player/`, and the float decode against the shipped `tra.exe` bytes via the .rsrc mapping.
+
+## Task-6 first increment: the audio decoder goes in only against its verified tables
+
+AUDIO.md §3 already pins the engine's ADPCM contract **[V-exe]**: 36-byte blocks in, 64 samples out, precomputed per-byte
+delta pairs at `0x8b6390`, a step table at `0x66a288` clamped to `0x1FFF` and scaled by four — with the family-1 `.mul`
+codec still open and explicitly *not* in the creator chain. So the first game-loop increment ordered by that doc is not a
+guess at family 1: it is `src/cdc/Sound.*` implementing exactly §3's shape, with its tables built once from the IMA
+standard and compared word-for-word against `tra.exe` at the two recorded addresses — the same "read the engine's own
+tables" discipline used for the strip rule (§17) and the material table (§19). Family-1 streams stay unresolved until
+§5.2's winmm `waveOutWrite` capture lands; nothing about them moves into code.
