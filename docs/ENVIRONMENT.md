@@ -119,8 +119,15 @@ pattern with only terminal windows on top — no menu, no hall — so the guest 
 no longer composites where the screenshots can see it. But the capture instrument is fixed by one falsifier [V-data]
 (2026-10-22, `openanniversary-work/wincap-test.sh`): `import -window <id>` aimed at the Wine window ID grabs its pixels
 exactly - the same window that is only rings in a desktop screenshot comes out complete. Window-target capture, not
-desktop capture, is what motion measurement must use. Motion stays unmeasured; the next session walks with one
-window-grab per second and reads landmark crossings off the captured frames.
+desktop capture, is what motion measurement must use. The same session then settled why the game never opens headless [V-data]
+(2026-10-22, three sessions): the launcher dialog answers nothing synthetic — a 48-click grid over
+its Ok button area (with `windowraise`/`windowfocus` first), `xdotool key --window <id>` of Return/Enter/Tab/space, and the
+Escape march all leave the popup open, and no window titled exactly `Tomb Raider: Anniversary` ever appears; a real mouse
+click on Ok (done manually by the user, 2026-10-22) does open it. `ydotool` (Wayland-level uinput clicks) is not installed
+on this host. So the shipped-game motion cross-check needs the user's Ok click in the session, or ydotool installed,
+before any window-grab can measure walking. The desktop frames showing Wine's ring wallpaper over everything are the
+virtual-desktop state the earlier October sessions did not have — treat as environment drift to re-isolate if manual
+launch also shows rings. Motion stays unmeasured.
 
 One durable find came out of the same prefix while diagnosing that popup: `wine-tra/user.reg` holds the shipped game's
 own settings tree (`HKCU\Software\Crystal Dynamics\Tomb Raider: Anniversary` plus `\Graphics` and `\Input` subsections),
