@@ -176,3 +176,26 @@ accessor chains) — while the *numbers* are bounded [V-data]: our model clears 
 25–200-unit cluster and the 4956BEA0 396-unit jump) and does not clear the level's p50 1562-unit voids. The model reproducing
 that envelope, plus the 200-unit climb reach, is the cross-check; equality of our five tuning literals to shipped floats is
 explicitly *not* claimed, and is probably false — the shipped engine keeps them in data tables we have not located by name.
+
+## Movement mechanics — what the shipped engine actually does (V-exe)
+
+The behavior cross-check for the verified traversal (M5) reads `tra.exe` statically; no numbers were inferred from our model:
+
+- **Movement values are state slots, not code literals.** The physics-roll accessor (`FUN_00566de0`, which stores
+  `s_physicsRollProxy` at `0x6569d0`) reads/writes every quantity through a getter chain over player-state offsets
+  (`return (float10)*(float *)(param_1 + 0x148);`, writes at `+0xac/+0xb0/+0x6c..` walked with stride 4). The engine integrates
+  velocity/gravity as fields of the player record; tuning tables live in data the accessors dereference.
+- **Climber Proxy reach pinned exactly.** The function referencing `Climber Proxy` (at `0x656628`) computes
+  `delta = *(float *)(player + 0x108) - DAT_00654684` and clamps `delta` at `0.0` before storing through
+  `FUN_0050e970`; `DAT_00654684` decodes live from the `.rsrc` mapping (`VA 0x401000 ↔ file 0x200`) to exactly **200.0f** —
+  the shipped game's hand-over climb budget is 200 world units on the level's own scale, the same 25–200-unit edge band
+  GEOMETRY §24 measured from the archive side. Our model's verified traversal climbs stay at/below that reach.
+- **Negative, stated honestly:** the literal set `750.0f / 620.0f / 25.0f` (our run/jump/step tuning) occurs **nowhere** in the
+  decompiled corpus, and their per-frame forms at 30/60 Hz do not either; `400.0f` (38 sites) and `2000.0f` (15 sites) occur
+  but only in unrelated contexts — `(2000,2000,2000)` clamp triples, `999999.0` sentinels, camera far values — no function
+  loads both, so none may be attributed to player physics. Our model's constants were chosen to *fit the shipped data's
+  envelope* (gap widths, the 200-unit climb budget), not to equal shipped floats, and this section records that distinction
+  instead of claiming a numeric match.
+
+Repro: `openanniversary-work/ghidra/exports/movement-strings-xrefs.tsv` (the ExportXrefs string-scan run above), the two
+decompiled users in `decomp-player/`, and the float decode against the shipped `tra.exe` bytes via the .rsrc mapping.
