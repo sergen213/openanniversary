@@ -25,35 +25,92 @@ public class ExportXrefs extends GhidraScript {
         tsv.println("target\tkind\tsite\tinstruction\tfunction");
 
         for (int i = 1; i < args.length; ++i) {
-            long v = Long.parseUnsignedLong(args[i].replaceAll("^0[xX]", ""), 16);
-            Address a = toAddr(v);
-            int recovered = 0, stored = 0;
-            for (Reference r : currentProgram.getReferenceManager().getReferencesTo(a)) {
-                CodeUnit cu = currentProgram.getListing().getCodeUnitAt(r.getFromAddress());
-                Function f = getFunctionContaining(r.getFromAddress());
-                tsv.println(hex(v) + "\tref\t" + hex(r.getFromAddress().getOffset()) + "\t"
-                        + (cu == null ? "?" : cu.toString()) + "\t" + (f == null ? "" : f.getName()));
-                ++recovered;
-            }
-            for (MemoryBlock b : currentProgram.getMemory().getBlocks()) {
-                monitor.checkCancelled();
-                // code blocks too: tra.exe reaches its strings through disp32 operands Ghidra never turned into references
-                if (!b.isInitialized()) {
-                    continue;
+            String arg = args[i];
+            if (arg.matches("0[xX][0-9a-fA-F]+")) {
+                long v = Long.parseUnsignedLong(arg.replaceAll("^0[xX]", ""), 16);
+                Address a = toAddr(v);
+                int recovered = 0, stored = 0;
+                for (Reference r : currentProgram.getReferenceManager().getReferencesTo(a)) {
+                    CodeUnit cu = currentProgram.getListing().getCodeUnitAt(r.getFromAddress());
+                    Function f = getFunctionContaining(r.getFromAddress());
+                    tsv.println(hex(v) + "\tref\t" + hex(r.getFromAddress().getOffset()) + "\t"
+                            + (cu == null ? "?" : cu.toString()) + "\t" + (f == null ? "" : f.getName()));
+                    ++recovered;
                 }
-                byte[] data = new byte[(int) b.getSize()];
-                b.getBytes(b.getStart(), data);
-                long base = b.getStart().getOffset();
-                for (int k = 0; k + 4 <= data.length; k += 4) {
-                    if (u32(data, k) == v) {
-                        tsv.println(hex(v) + "\tvalue\t" + hex(base + k) + "\t\t");
-                        ++stored;
+                for (MemoryBlock b : currentProgram.getMemory().getBlocks()) {
+                    monitor.checkCancelled();
+                    // code blocks too: tra.exe reaches its strings through disp32 operands Ghidra never turned into references
+                    if (!b.isInitialized()) {
+                        continue;
+                    }
+                    byte[] data = new byte[(int) b.getSize()];
+                    b.getBytes(b.getStart(), data);
+                    long base = b.getStart().getOffset();
+                    for (int k = 0; k + 4 <= data.length; k += 4) {
+                        if (u32(data, k) == v) {
+                            tsv.println(hex(v) + "\tvalue\t" + hex(base + k) + "\t\t");
+                            ++stored;
+                        }
                     }
                 }
+                println("target " + hex(v) + ": " + recovered + " reference(s), " + stored + " stored dword(s)");
             }
-            println("target " + hex(v) + ": " + recovered + " reference(s), " + stored + " stored dword(s)");
+            else {
+                scanString(tsv, arg);
+            }
         }
         tsv.close();
+    }
+
+    // a string literal arg: find its bytes, then who references them or a slot holding a pointer to them.
+    // @category OpenAnniversary
+    private void scanString(PrintWriter tsv, String s) throws Exception {
+        byte[] needle = (s + " ").getBytes("ASCII");
+        needle[needle.length - 1] = 0;
+        int found = 0;
+        for (MemoryBlock b : currentProgram.getMemory().getBlocks()) {
+            monitor.checkCancelled();
+            if (!b.isInitialized()) {
+                continue;
+            }
+            byte[] data = new byte[(int) b.getSize()];
+            b.getBytes(b.getStart(), data);
+            long base = b.getStart().getOffset();
+            for (int k = 0; k + needle.length <= data.length; ++k) {
+                boolean hit = true;
+                for (int j = 0; j < needle.length && hit; ++j) hit = data[k + j] == needle[j];
+                if (!hit) continue;
+                long site = base + k;
+                ++found;
+                tsv.println(s + "\tstring\t" + hex(site) + "\t\t");
+                usersOf(tsv, s, site);
+            }
+        }
+        println("string '" + s + "': " + found + " occurrence(s)");
+    }
+
+    private void usersOf(PrintWriter tsv, String s, long site) throws Exception {
+        Address a = toAddr(site);
+        for (Reference r : currentProgram.getReferenceManager().getReferencesTo(a)) {
+            Function f = getFunctionContaining(r.getFromAddress());
+            if (f != null) tsv.println(s + "\tuser\t" + hex(r.getFromAddress().getOffset()) + "\t\t" + f.getName());
+        }
+        for (MemoryBlock b : currentProgram.getMemory().getBlocks()) {
+            monitor.checkCancelled();
+            if (!b.isInitialized()) continue;
+            byte[] data = new byte[(int) b.getSize()];
+            b.getBytes(b.getStart(), data);
+            long base = b.getStart().getOffset();
+            for (int k = 0; k + 4 <= data.length; k += 4) {
+                if (u32(data, k) != site) continue;
+                long slot = base + k;
+                tsv.println(s + "\tpointer\t" + hex(slot) + "\t\t");
+                for (Reference r : currentProgram.getReferenceManager().getReferencesTo(toAddr(slot))) {
+                    Function f = getFunctionContaining(r.getFromAddress());
+                    if (f != null) tsv.println(s + "\tuser\t" + hex(r.getFromAddress().getOffset()) + "\t\t" + f.getName());
+                }
+            }
+        }
     }
 
     private static String hex(long v) { return String.format("%08x", v); }

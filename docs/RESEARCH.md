@@ -147,3 +147,32 @@ see `docs/ENVIRONMENT.md`. What the tree contributes as fact:
 Reproduce: `grep -a -A40 'Crystal Dynamics' ../../openanniversary-work/wine-tra/user.reg`. The values here came from an
 October session that reached the hall; treat per-value choices as this prefix's state, the *key set* as shipped-engine
 fact.
+
+## Movement constants: what the shipped engine actually does (V-exe)
+
+The M5 behavior cross-check asked whether our model's tuning (`walkSpeed 400 / runSpeed 750 / gravity -2000 / jumpSpeed 620 /
+maxStepUp 25` world-units-per-second, `src/game/Avatar.hpp`) appears in `tra.exe`. It does not appear *as code immediates* — and
+that negative is itself the finding:
+
+- **The player-update code reaches its movement values through accessor wrappers over data**, not literals. The decompiled
+  physics-roll accessor (`FUN_00566de0`, the function that stores `s_physicsRollProxy` at `0x6569d0`) reads and writes every
+  movement quantity as a struct field: `return (float10)*(float *)(param_1 + 0x148);`, `*(float *)(iVar7 + 0xac) = ...`,
+  chains of `FUN_00508xxx()` setter/getter calls keyed by fixed state offsets (`+0xca0/+0xca4/+0xca8`, a list walked with
+  `+4` stride). The two direct string→code users the xref probe found (`physicsRollProxy` at `0x6569d0`, `Climber Proxy`
+  at `0x656628` — full probe recorded in `openanniversary-work/ghidra/exports/movement-strings-xrefs.tsv`) both take this shape.
+- **Float search, honest result.** `750.0f`, `620.0f` and `25.0f` do not occur anywhere in the decompiled corpus (`decomp_all.c`),
+  nor do their per-frame forms at 30/60 Hz. `400.0f` occurs 38× and `2000.0f` 15× but in unrelated contexts — camera far,
+  `(2000,2000,2000)` clamp triples, `999999.0` sentinels — none is a player-update function, and no function loads both.
+  Attributing them to movement would be a numeric coincidence, not evidence.
+- **What is pinned [V-exe] exactly once**: the climb proxy. The function that reads `Climber Proxy` computes
+  `delta = *(float *)(player + 0x108) - 200.0f` clamped at `0.0` (the `0.0`/epsilon pair decoded live from the `.rsrc` mapping
+  `VA 0x401000 ↔ file 0x200`): the shipped game's hand-over reach is 200 world units on the *level's own scale*, matching
+  the GEOMETRY §24 claim that designed edges cluster in 25–200-unit bands. Our verified traversal's climb steps stay at or
+  below that reach.
+
+**Conclusion for M5's "validated against original-game behavior" half:** the exe proves the *mechanism* — per-tick accessor
+field updates over a data-driven state table (gravity as a signed field written at `+0xac`-class offsets, velocity as
+accessor chains) — while the *numbers* are bounded [V-data]: our model clears the designed short edges (the 8baf540e envelope's
+25–200-unit cluster and the 4956BEA0 396-unit jump) and does not clear the level's p50 1562-unit voids. The model reproducing
+that envelope, plus the 200-unit climb reach, is the cross-check; equality of our five tuning literals to shipped floats is
+explicitly *not* claimed, and is probably false — the shipped engine keeps them in data tables we have not located by name.

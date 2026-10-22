@@ -653,7 +653,17 @@ int main(int argc, char** argv) {
                 // cell and accepts only holes whose runway and shore are continuous at that resolution: without that rule the
                 // body took off from a sliver, sailed over ground it never touched and fell out of the world, which is what
                 // every attempt on sixteen units did before this change. Top three, widest first.
+                // --gapEnvelope=true turns the same scan into a measurement instead of an attempt: every edge a walked
+                // route meets (continuous runway + shore) is recorded with its TRUE void width - probed out to 12 cells,
+                // not just to jump reach - so the level's own designed-gap envelope can be compared against what the
+                // tuned model clears. Designers place a jump where the original Lara could make it, so every gap under
+                // their route's edge bounds the original capability from below; voids she must go around bound related
+                // moves from above. docs/ROADMAP.md Milestone 5 calls this the behavior instrument now.
+                const bool envelope = config.flag("gapEnvelope", false);
+                std::vector<float> gaps;
+                if (envelope) gaps.reserve(4096u);
                 const float probeStep = cell / 8.0f;
+                const float holeCap = 12.0f * cell;   // true extent within 12 cells; beyond reads as an ocean
                 Candidate best[3] = {};
                 int bestCount = 0;
                 for (std::uint32_t iz = 0u; iz < kSamples; ++iz) {
@@ -675,8 +685,9 @@ int main(int argc, char** argv) {
                             while (holeStart <= reach && floorAt(holeStart)) holeStart += probeStep;
                             if (holeStart > reach) continue;   // this line holds no edge within jump range
                             float holeEnd = holeStart;
-                            while (holeEnd <= reach && !floorAt(holeEnd)) holeEnd += probeStep;
+                            while (holeEnd <= holeCap && !floorAt(holeEnd)) holeEnd += probeStep;
                             const float gap = holeEnd - holeStart;
+                            if (envelope && gap >= 0.5f * cell && gaps.size() < 4096u) gaps.push_back(gap);
                             if (gap < 0.5f * cell || gap + lipProbe > reach) continue;   // a crack is not a jump
                             // The far side has to stay solid for another cell and a half, not just answer the first probe.
                             bool shore = true;
@@ -701,7 +712,29 @@ int main(int argc, char** argv) {
                                                       "continuous runway and shore in the gated coverage of '{}'",
                            reach / cell, meshPath);
                 }
-                for (int attempt = 0; attempt < bestCount; ++attempt) {
+                if (envelope) {
+                    std::sort(gaps.begin(), gaps.end());
+                    if (!gaps.empty()) {
+                        const std::size_t closed = static_cast<std::size_t>(
+                            std::lower_bound(gaps.begin(), gaps.end(), holeCap - 0.001f) - gaps.begin());
+                        std::uint64_t clearable = 0u;
+                        for (std::size_t i = 0; i < closed; ++i) if (gaps[i] + lipProbe <= reach) ++clearable;
+                        OA_LOG(oa::LogLevel::Info, "app", "gap envelope of '{}': {} edges (runway+shore, >=half-cell) over the "
+                                                          "gated coverage; {} voids close within the {:.0f}-unit probe cap - those "
+                                                          "widths p50 {:.0f} p90 {:.0f} max {:.0f} units - {} of {} closed edges "
+                                                          "are clearable in one flat-ground jump at run speed (reach {:.0f} less "
+                                                          "take-off lead {:.0f}); {} uncapped edges are open water to a canyon "
+                                                          "across, not designed jumps",
+                                   meshPath, gaps.size(), closed, holeCap,
+                                   closed ? gaps[closed / 2u] : 0.0f, closed ? gaps[closed * 9u / 10u] : 0.0f,
+                                   closed ? gaps[closed - 1u] : 0.0f, clearable, closed, reach - lipProbe, lipProbe,
+                                   gaps.size() - closed);
+                    } else {
+                        OA_LOG(oa::LogLevel::Warn, "app", "gap envelope of '{}': no edges recorded in the gated coverage", meshPath);
+                    }
+                }
+                const int attemptCount = envelope ? 0 : bestCount;
+                for (int attempt = 0; attempt < attemptCount; ++attempt) {
                     const Candidate& pick = best[attempt];
                     const Direction dir = kDirs[pick.dir];
                     const float yawToFace = std::atan2f(dir.x, dir.z);   // src/game/Avatar.cpp: forward = (sin yaw, cos yaw)
