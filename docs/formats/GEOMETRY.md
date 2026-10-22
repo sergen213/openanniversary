@@ -759,3 +759,38 @@ colour. A material whose page does not resolve binds a white 1x1 instead, so its
    right geometry at a glance; page-to-page seams are not yet checked); wrapped sampling hides a whole-page V-flip
    at this coverage, so the flip question stays with §17's. The colour-only self-check path is unchanged and still
    reports `0 unexplained` bytes.
+
+## 24. The levels own jump envelope, measured across the sixteen largest v14 units [V-data]
+
+The candidate scan of §19 doubled as a measurement when asked: `--gapEnvelope=true` records EVERY edge a
+runway+shore line meets - not only jumpable ones - with the void's TRUE width (probed to 12 cells; beyond
+reads as open water) and reports per unit: edge count, widths p50/p90/max over the voids that close inside
+the cap, and how many of those one flat-ground jump at run speed could clear with the §19 tuning.
+`openanniversary-work/run-gap-envelope.sh` runs it over `v14-top16.txt`, selected by rule: container records
+whose specMask is FFFFFFFF, whose image parses as DRM `version=14`, and whose type-0 (general) section is at
+least 800 kB - 66 units qualify, the sixteen largest of them by that section's size, the same set §4 of
+docs/TESTING.md crossed holes on. The reach column varies per unit (344-446 units) because the census cell
+comes from that mesh's own median edge; edge counts count candidate lines, so one small pond seen from
+eight directions counts eight times.
+
+| unit | edges | p50-p90-max closed voids | clearable | reach |
+|---|---|---|---|---|
+| 8baf540e (start hall) | 39 | 1562-1832-1851 | 1 | 426 |
+| c2a23383 | 605 | 666-888-917 | 201 | 446 |
+| 2388b2f0 | 3458 | 2322-2541-2596 | 383 | 410 |
+| b1927dea | 1721 | 2161-2389-2415 | 297 | 414 |
+| 2dae6592 | 644 | 3462-3695-3734 | 104 | 387 |
+| b76fbce6 | 2053 | 2991-3308-3343 | 180 | 395 |
+| 7bad4270 | 1929 | 3879-4049-4049 | 132 | 380 |
+| 63926cc3 | 1527 | 2989-3230-3264 | 180 | 396 |
+| others (8 units) | 37-981 | 062-5822 wide | 3-86 each | 344-422 |
+
+What this bounds, honestly: (1) every unit shows designed short edges - the same kind §19 verified on the
+start hall - that the tuned body clears; (2) the typical void on walked lines is 2,000-5,800 units wide at
+every unit, ten times the model's reach: the model never claims those, and the levels connect such rooms
+by their own routes, not by one jump; (3) the model's reach never exceeds even the SMALLEST closed-void
+population median (c2a23383's 666), i.e. the tuning sits inside the levels' own envelope and cannot
+over-reach what the designers left as their smallest deliberate gap at that unit. What it does not settle
+is the engine's own jump numbers - that half of the M5 cross-check is the pending static read of tra.exe's
+player-update constants in the Ghidra project [V-exe-still-open]; the numbers above are [V-data] evidence
+about the LEVELS (designer-placed bounds), read through the §16-§19 decode, not about the engine's limits.
