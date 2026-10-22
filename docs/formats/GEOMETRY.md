@@ -704,6 +704,13 @@ Two results on the §20 table, both reproducible:
    4956BEA0 --section 1` decodes a 1024x1024 DXT1 chain with 11 mips, sections 2/3 512x512 with 10 [V-data].
    Reproduce: dump the table with `openanniversary-work/matrec <drm> <section>` (43 and 141) and
    the section directory with `./build/oa-asset <game-dir> drm --hash 4956BEA0` / `... 8BAF540E`.
+3. **A luma-ranking probe cannot confirm the binding - recorded so nobody reruns it.** A statistical test over
+   `4956BEA0`'s 108 class-32 materials with triangles (mean texel luma of DXT1 mip 0 at the flipped-V wrapped vertex
+   UVs, named page ranked against the unit's other 35 DXT1 pages) came out indistinguishable from random: mean rank
+   17.4 of 36, rank-1 in 2 materials, last in 4. Luma does not carry the binding signal - a bright page scores well
+   for every material - so the class-32 reading stays supported by the id-space coincidence (§21 item 2), not by this
+   test, and confirmation comes from drawing one material with its named page and comparing against the shipped game
+   (Milestone 4's experiment a). Reproduce: `openanniversary-work/texbind /tmp/4956BEA0.drm 43` [V-data].
 
 ## 22. With bases applied, the entrance hall covers ground a foot stands on: 715 of 2,304 columns, measured [V-data]
 
