@@ -124,3 +124,26 @@ and they mark the terrain/collision drawing code as switchable at runtime - usef
   actually published.
 * Repo floor: `cmake_minimum_required(VERSION 3.28)`; host carries CMake 4.4.4 and Ninja 1.13.2 (full pinned list in
   `docs/ENVIRONMENT.md`).
+
+## 7. The shipped game's own settings tree **[V-data]**
+
+`wine-tra/user.reg` (the prefix built by `docs/ENVIRONMENT.md`'s run recipe) contains the key the shipped `tra.exe`
+writes and reads: `HKCU\Software\Crystal Dynamics\Tomb Raider: Anniversary`, with subsections `\Graphics` and
+`\Input`. Writing the keys and launching is what community notes say makes the game skip its start-time setup dialog
+(pcgamingwiki.com TR Anniversary page, [S]); under Wine the dialog appears regardless — settled negative 2026-10-22,
+see `docs/ENVIRONMENT.md`. What the tree contributes as fact:
+
+* renderer feature vocabulary — `EnableShadows`, `EnableReflection`, `EnableDepthOfField`, `EnableWaterFX`,
+  `EnableFullscreenEffects`, `EnableVSync`, `AntiAliasing`, `Contrast`, `Brightness`, `BestTextureFilter`,
+  `UseShader30`, `UseShader20`, `CreateGameFourCC`, `AlwaysRenderZPassFirst`, `FullscreenModeID` (packed-mode dword,
+  0x300400 on this prefix's last write) — exactly the option set the launcher dialog draws; this is the option list a
+  settings screen for Milestone 7 should speak, named by the shipped engine itself, not guessed;
+* audio/control plumbing — `MusicVolume`/`SfxVolume`/`VoVolume` as dwords at 0x80, `UseReverb`, `Vibration`,
+  `DisableForceFeedback`, `AimXInverted`/`AimYInverted`/`CameraXInverted`/`CameraYInverted`, `MouseSensitivity`,
+  `CombatMode`, `Hints`, a zero-filled `Gamepad` string, and an `\Input` subsection of numeric key rows;
+* `CreateGameFourCC=1` and the `MRUProfileName`/"Default Profile" pair point at a FourCC-tagged profile blob —
+  consistent with the section-magic generations of §4; keep as a lead, not a claim.
+
+Reproduce: `grep -a -A40 'Crystal Dynamics' ../../openanniversary-work/wine-tra/user.reg`. The values here came from an
+October session that reached the hall; treat per-value choices as this prefix's state, the *key set* as shipped-engine
+fact.

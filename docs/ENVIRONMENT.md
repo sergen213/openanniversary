@@ -100,6 +100,34 @@ Measured [V-data]: `/proc/<pid>/maps` shows the chain `trawork/d3d9.dll` (the in
 1.1 GB of text - stop the game once the level is loaded. Buffer contents only appear as `vb_*.bin`/`ib_*.bin` when a
 resource can actually be locked, which default-pool terrain buffers cannot: that capture logged zero dump files.
 
+Milestone-5 research added a slot probe to the shim (`OA_PROBE_SLOT=<n>` patches only vtbl slot n with a
+hook that logs its sixteen float arguments and forwards). Measured negative [V-data] (2026-10-22): nine
+runs of ~30-80 s reaching the hall — with `OA_PROBE_SLOT` at the header's `SetViewport`-neighbour slots
+201±4, at the past-header-declared slots 288..292, and even at slot 82, the one confirmed as `DrawIndexedPrimitive`
+by the October capture — logged **zero** draw or probe lines, while that October session logged 17.9 M of them.
+Whatever differs between that capture's session and these runs, the d3d9 device path stops being reached; it is
+isolated first before any motion measurement is attempted. The prefix chain, the run line and the install script
+are unchanged from the working recipe above.
+
+Measured (2026-10-22, second attempt at the motion session, `openanniversary-work/run-walk-measure2.sh`): the launcher
+popup now titled **`Tomb Raider: Anniversary - Setup`** (426x367 client area at 1707,910; "Rendering Setup" is only its
+drawn caption, so the October scripts' `xdotool search --name 'Rendering Setup'` finds nothing) does open the game —
+synthetic clicks at its drawn Ok button reach nothing while a keyboard-Escape march does: the game window
+`Tomb Raider: Anniversary` appeared and Down+Return on the activated window still starts a new game as in October. What
+the screenshots show is not usable for motion, though: every desktop frame is Wine's full-screen `wine-desktop` ring
+pattern with only terminal windows on top — no menu, no hall — so the guest renders into something the XWayland surface
+no longer composites where the screenshots can see it. Motion stays unmeasured [V-data] (negative, with the partial
+positive above); the walk/jump cross-check needs the guest's visible-content path settled before any timing claim.
+
+One durable find came out of the same prefix while diagnosing that popup: `wine-tra/user.reg` holds the shipped game's
+own settings tree (`HKCU\Software\Crystal Dynamics\Tomb Raider: Anniversary` plus `\Graphics` and `\Input` subsections),
+written by an earlier session — the option names and value types the shipped renderer actually carries (`EnableShadows`,
+`EnableReflection`, `EnableDepthOfField`, `EnableWaterFX`, `EnableVSync`, `AntiAliasing`, `Contrast`, `Brightness`,
+`UseShader30`, `CreateGameFourCC`, volumes as dwords, aim/camera-invert flags, a `Gamepad` string table). That is the
+feature-flag vocabulary for Milestone 7 and a FourCC hint for the container research; recorded in
+`docs/RESEARCH.md` §7. [V-data] — reading our own prefix; the launch-semantics half of it (settings live in that
+registry key, `tra.exe -setup` opens the dialog) is prior-community [S] via pcgamingwiki.com's TR Anniversary page.
+
 ## Display and visual verification
 
 * KDE Plasma on Wayland (`$WAYLAND_DISPLAY=wayland-1`, compositor `kwin_wayland`); an XWayland bridge answers at
