@@ -115,9 +115,12 @@ drawn caption, so the October scripts' `xdotool search --name 'Rendering Setup'`
 synthetic clicks at its drawn Ok button reach nothing while a keyboard-Escape march does: the game window
 `Tomb Raider: Anniversary` appeared and Down+Return on the activated window still starts a new game as in October. What
 the screenshots show is not usable for motion, though: every desktop frame is Wine's full-screen `wine-desktop` ring
-pattern with only terminal windows on top — no menu, no hall — so the guest renders into something the XWayland surface
-no longer composites where the screenshots can see it. Motion stays unmeasured [V-data] (negative, with the partial
-positive above); the walk/jump cross-check needs the guest's visible-content path settled before any timing claim.
+pattern with only terminal windows on top — no menu, no hall — so the guest renders into something the XWayland desktop surface
+no longer composites where the screenshots can see it. But the capture instrument is fixed by one falsifier [V-data]
+(2026-10-22, `openanniversary-work/wincap-test.sh`): `import -window <id>` aimed at the Wine window ID grabs its pixels
+exactly - the same window that is only rings in a desktop screenshot comes out complete. Window-target capture, not
+desktop capture, is what motion measurement must use. Motion stays unmeasured; the next session walks with one
+window-grab per second and reads landmark crossings off the captured frames.
 
 One durable find came out of the same prefix while diagnosing that popup: `wine-tra/user.reg` holds the shipped game's
 own settings tree (`HKCU\Software\Crystal Dynamics\Tomb Raider: Anniversary` plus `\Graphics` and `\Input` subsections),
