@@ -870,8 +870,16 @@ int main(int argc, char** argv) {
             // scripted run finished, so what you see on screen is the same body the numbers describe.
             if (config.flag("avatarDrive", false)) {
                 if (!alive) {
-                    OA_LOG(oa::LogLevel::Warn, "app", "--avatarDrive skipped: the scripted run already left the level");
-                } else {
+                    // The scripted straight-line run fell, but the census found a standing spot — start there
+                    // instead of refusing, so a keyboard session still has a body on the level.
+                    if (!oa::game::placeOnGround(&avatar, spawnX, spawnZ, spawn.y + 10.0f, 30.0f, 40.0f, terrain)) {
+                        OA_LOG(oa::LogLevel::Warn, "app", "--avatarDrive skipped: the scripted run already left the level");
+                    } else {
+                        alive = true;
+                        OA_LOG(oa::LogLevel::Info, "app", "--avatarDrive starts at the census spawn instead: the straight run fell");
+                    }
+                }
+                if (alive) {
                     driveTerrain = std::move(terrain);
                     driven = avatar;
                     driveAvatar = true;
