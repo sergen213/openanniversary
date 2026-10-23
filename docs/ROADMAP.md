@@ -37,3 +37,6 @@ acceptance evidence exists in this repository; otherwise it says what is missing
    and movies (`.bik`/`.sch`) still need path templates recovered from `tra.exe` string xrefs.
 4. Licensing: this tree is GPL-3.0-or-later to stay compatible with the sister projects; revisit before any code is
    taken from another project's tree.
+5. The standalone family-1 sound records (`AUDIO.md` §1) still have no framing (their negative results are `AUDIO.md`
+   §7's second half): the in-unit type-6 path is closed, so playback of unit-carried sounds can ship first; container-only
+   stream records need their table/layout read before they decode.

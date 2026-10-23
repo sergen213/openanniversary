@@ -2,7 +2,9 @@
 
 Status: **the §3 block-path decoder ships** (`src/cdc/Sound.hpp/.cpp`, tested by `tests/test_sound.cpp`): its step ladder is
 compared word-for-word against `tra.exe` **[V-exe]**, while the scalar nibble form follows the prior art (flagged **[S]**
-in the header). The payload encoding of the archive records that carry sound (family 1, §1-§2) is still not established. Everything below is either read out of the shipped install or read out of
+in the header). The payload encoding of the standalone archive records that carry sound (family 1, §1-§2) is still not
+established - but sounds inside DRM units (§7) do frame as a twelve-byte header plus whole §3 blocks, so their loader path
+is settled. Everything below is either read out of the shipped install or read out of
 `tra.exe` (sha256 `b43ade0d922b0f007747e5707b97c86404cbf4f051829e3711f7007a656ea53a`); the open question is named at the end.
 Evidence tags follow `docs/RESEARCH.md`: **[V-data]** = measured on the install, **[V-exe]** = read from the binary,
 **[S]** = prior art / secondary source.
@@ -119,3 +121,19 @@ all hash to zero records. [V-data] the chain is read though: `FUN_00418720` inst
 hands it the string, and the interpreter handler `FUN_0042e8b0` copies the name out of a runtime string buffer
 (`DAT_007c8870`) that the level scripts fill, then logs `Unable to create soundstream: %s` on failure. So the name IS
 a plaintext string in level script data — just not in `cn3`'s two sections.
+## 7. Type-6 sections inside DRM units: twelve-byte header plus whole ADPCM blocks **[V-data, 2026-10-23]**
+
+Measured directly on `pc-w\lara.drm` (record hash `5FF91900`, section directory index 24 = payload size 32,736; extracted
+through the hex-parsing quirk of GEOMETRY.md §19 by asking for section `18`): the payload is `{u32 rate, i32 loopStart,
+u32 loopEnd}` with (size - 12) % 36 == 0 and no leftover — 909 blocks — and every one of those blocks passes §3's structural
+test (step byte at +2 <= 88, the engine's ladder clamp, AND reserved byte at +3 == 0). The same rule closes on all 229 type-6
+sections of that unit, and for its four looping sounds `loopEnd` equals blocks * 64 samples exactly. Inside a unit, then:
+sound = twelve-byte header straight into §3's 36-byte blocks **[V-data]**.
+
+The standalone archive records of family 1 (§1) are NOT that shape and their framing stays open **[V-data negative]**: `001AA4B3`
+(size 11,472) leaves a 12-byte remainder after 318 blocks at +12; the only starts where (size - H) is a whole number of
+blocks consistent with the +8 field are the length-derived H = size - (+8 * 9 / 16) ({2,688, 3,248, 3,936, 4,752} on four
+sampled records), but blocks read there pass structural sanity on only 17-24% of them. A sweep over every 4-byte start finds
+no offset with a sane majority (only trivial two-block tails score high). So standalone family-1 records carry an extra table
+or different block layout between header and stream; the loader path for them is unresolved, while the in-unit type-6 path
+above is what `FUN_005eca10` receives.
