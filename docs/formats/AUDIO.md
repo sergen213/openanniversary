@@ -1,7 +1,8 @@
 # Sound payloads: what is measured, and what is not
 
-Status: **no decoder ships**. The engine's own decode path is located in `tra.exe`, but the payload encoding of the archive
-records that carry sound has not been established. Everything below is either read out of the shipped install or read out of
+Status: **the §3 block-path decoder ships** (`src/cdc/Sound.hpp/.cpp`, tested by `tests/test_sound.cpp`): its step ladder is
+compared word-for-word against `tra.exe` **[V-exe]**, while the scalar nibble form follows the prior art (flagged **[S]**
+in the header). The payload encoding of the archive records that carry sound (family 1, §1-§2) is still not established. Everything below is either read out of the shipped install or read out of
 `tra.exe` (sha256 `b43ade0d922b0f007747e5707b97c86404cbf4f051829e3711f7007a656ea53a`); the open question is named at the end.
 Evidence tags follow `docs/RESEARCH.md`: **[V-data]** = measured on the install, **[V-exe]** = read from the binary,
 **[S]** = prior art / secondary source.
@@ -92,5 +93,6 @@ Statistics have been exhausted; two concrete evidence paths remain, in order of 
 2. Run the shipped `tra.exe` under Wine with a capture on `winmm!waveOutWrite`, then compare captured buffers against record
    payloads; that pins both the codec and which records carry which stream.
 
-Until one of those lands, no audio decoder goes into `src/cdc`: an unverified guess would silently corrupt every sound in
-the game. The ADPCM facts in §3 are recorded so that the first verified implementation can be written directly against them.
+The ADPCM facts in §3 have been written against: §3's block-path decoder now ships in `src/cdc/Sound.*`. For the `.mul` family
+nothing unverified has shipped: an unverified guess there would silently corrupt every stream sound, so the winmm capture above
+stays the next audio experiment.
