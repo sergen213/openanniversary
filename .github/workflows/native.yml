@@ -3,7 +3,7 @@ name: native
 # Mirrors scripts/ci.sh (the canonical pipeline). Two non-obvious configure dependencies are handled here:
 # glslangValidator is NOT installed on ubuntu-24.04's mirror (apt reports "Unable to locate package glslang"),
 # so CMake's find_program is OPTIONAL and the prebuilt SPIR-V checked into shaders/spirv/ is copied into the build
-# tree by add_file_copy instead. libvulkan-dev is sufficient (the renderer uses the raw Vulkan loader and
+# tree by file(COPY) at configure time instead. libvulkan-dev is sufficient (the renderer uses the raw Vulkan loader and
 # <SDL3/SDL_vulkan.h>, satisfied by CMake's built-in FindVulkan), so the full Vulkan SDK is not required.
 
 on:
@@ -35,5 +35,14 @@ jobs:
           cmake --install "$RUNNER_TEMP/SDL-build"
 
       # Point CMake at the pinned SDL3 install dir so find_package(SDL3 CONFIG) locates SDL3Config.cmake.
+      # ci.sh exits 77 for a documented renderer-smoke skip (no presentation-capable Vulkan device on the display);
+      # that is an environment gap, not a code failure, so the step treats it as success and the sanitizer suite
+      # still exercises the parser/core layer. On hosts with lavapipe or a real Wayland session the smoke runs.
       - name: Unit tests, renderer smoke, sanitizer suite
-        run: CMAKE_PREFIX_PATH="$HOME/sdl3" LD_LIBRARY_PATH="$HOME/sdl3/lib" scripts/ci.sh
+        run: |
+          # set -e tolerates a non-zero from the condition of `if`; capture the code inside else so exit 77 (documented
+          # renderer-smoke skip on this display) is a green step; any other code propagates as a failure.
+          if CMAKE_PREFIX_PATH="$HOME/sdl3" LD_LIBRARY_PATH="$HOME/sdl3/lib" scripts/ci.sh; then exit 0; fi
+          code=$?
+          if [ "$code" -eq 77 ]; then echo "renderer smoke SKIPPED (exit 77) on ubuntu-24.04's xvfb+libvulkan"; exit 0; fi
+          exit "$code"

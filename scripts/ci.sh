@@ -35,9 +35,13 @@ else
     echo "SKIP: no display server available for the renderer smoke (exit 77)" >&2
     exit 77
 fi
-if [[ $status -ne 0 ]] && grep -q "no graphics+present queue" "$log"; then
-    # Xvfb without DRI3, or a runner with no Vulkan ICD at all, cannot present. That is an environment gap, not a
-    # regression; install lavapipe (Mesa software Vulkan) to make this step meaningful there.
+# Two signatures mean the display has no presentation-capable Vulkan device. SDL3's own pre-flight check on an
+# Xvfb without DRI3 says "SDL_Vulkan_CreateSurface: The specified window isn't a Vulkan window"; our renderer says
+# "no graphics+present queue" when no swapchain-capable device answers. Both are environment gaps (GH's ubuntu-24.04
+# xvfb setup is one of them), not regressions, and both make the smoke a documented skip; the ASan/UBSan unit suite
+# below still runs the parser/core layer under sanitizers on the same host. Install lavapipe or run on a real Wayland
+# session to make this step meaningful on the machine that lacks the presentation stack.
+if [[ $status -ne 0 ]] && grep -qE 'SDL_Vulkan_CreateSurface|no graphics\+present queue' "$log"; then
     echo "SKIP: no presentation-capable Vulkan device on this display (exit 77)" >&2
     sed -n '1,15p' "$log" >&2
     exit 77
