@@ -27,7 +27,7 @@ acceptance evidence exists in this repository; otherwise it says what is missing
    values 9,466..10,540/18,438/18,630/35,009 (id 9,722 included) - no unit directory, no object-list, so a second namespace, still open; (c) the coarse remainder of `8baf540e` narrowed by §26: three trees
    whose payloads name no candidate table at all (the detector refuses their targets) plus two index gaps (70,921..73,408 and
    79,587..79,701) stay unexplained, and those chains keep median edges in the thousands - LOD rather than surface geometry is
-   the leading read but unproven; (d) what the +8 relocated slots point at (they land in a zero-filled stretch of
+   the leading read but unproven; §28's envelope scan on this same geometry counts 161 continuous runway+shore edges with p50 voids at 794 units and 14 one-jump clearable (§24 counted 39/1,562/one under the old single table), so the per-tree tables raise designed-jump evidence fourfold; (d) what the +8 relocated slots point at (they land in a zero-filled stretch of
    their own section, monotone ~50-80 apart); (e) other payload kinds and model-unit indexing for non-terrain meshes;
    (f) the multi-storey y spread §22 notes, expected to separate through oct-tree descent rather than the flat grid.
    Licensing note stands: consulted prior art (cdcEngine tr7, GPL-3.0) is licence-compatible with this GPL-3.0-or-later
