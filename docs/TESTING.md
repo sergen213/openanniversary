@@ -38,7 +38,7 @@ Runner-side behaviour (Ubuntu image plus `mesa-vulkan-drivers`/lavapipe) is *not
 
 ```sh
 cmake -S . -B build -G Ninja -DOA_BUILD_TESTS=ON && cmake --build build
-ctest --test-dir build --output-on-failure          # 53 tests, well under a second total
+ctest --test-dir build --output-on-failure          # 68 tests, well under a second total
 ```
 
 Fixture policy — the suite must pass with **no game data present**, so it is runnable in CI and on any machine:
