@@ -121,6 +121,7 @@ bool VkRenderer::init(platform::Window& window, const RendererConfig& config, st
     }
 
     // The command pool has to exist first: createRenderTargets allocates one command buffer per swapchain image.
+    presentMode_ = config.presentMode;
     if (!createSwapchain(window.widthPixels(), window.heightPixels(), error)) return false;
     if (!createRenderTargets(error)) return false;
     if (!createPipeline(error)) return false;
@@ -294,9 +295,18 @@ bool VkRenderer::createSwapchain(int widthPixels, int heightPixels, std::string*
     vkGetPhysicalDeviceSurfacePresentModesKHR(physical_, surface_, &presentCount, nullptr);
     std::vector<VkPresentModeKHR> modes(presentCount);
     vkGetPhysicalDeviceSurfacePresentModesKHR(physical_, surface_, &presentCount, modes.data());
-    const VkPresentModeKHR presentMode = std::find(modes.begin(), modes.end(), VK_PRESENT_MODE_FIFO_KHR) != modes.end()
-                                             ? VK_PRESENT_MODE_FIFO_KHR
-                                             : modes.front();
+    // The default is the wait-for-vertical-blend swap (the steady, tear-free rhythm); presentMode 1 in
+    // RendererConfig asks for the no-wait swap instead — same image loop, just no pacing, which is what
+    // measures the frame-rate independence. Unavailable modes fall back to the default and say so.
+    const VkPresentModeKHR wanted =
+        presentMode_ == 1 ? VK_PRESENT_MODE_IMMEDIATE_KHR : VK_PRESENT_MODE_FIFO_KHR;
+    const VkPresentModeKHR presentMode = std::find(modes.begin(), modes.end(), wanted) != modes.end()
+                                             ? wanted
+                                             : (std::find(modes.begin(), modes.end(), VK_PRESENT_MODE_FIFO_KHR) != modes.end()
+                                                    ? VK_PRESENT_MODE_FIFO_KHR
+                                                    : modes.front());
+    if (presentMode != wanted)
+        OA_LOG(LogLevel::Warn, "vk", "present mode {} requested but not offered by this surface, going with the wait", static_cast<int>(wanted));
 
     extent_ = capabilities.currentExtent.width != 0xFFFFFFFFu
                   ? capabilities.currentExtent

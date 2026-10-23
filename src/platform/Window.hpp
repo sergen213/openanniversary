@@ -43,10 +43,18 @@ public:
     bool shouldClose() const { return closed_; }
     // Named keys so the app never learns SDL's scancode numbers. Anything not listed here stays unpolled.
     bool keyDown(Key key) const;
+    bool gamepadDown(Key key) const;   // the pad half of keyDown, polled separately so tests can ask alone
+
+    // Adopts the first connected gamepad and logs its identity once. While one is adopted, keyDown also
+    // answers from the pad: the left stick and the d-pad become the named direction keys (and the WASD
+    // aliases), South is Jump, East is Run, the shoulder buttons dolly. A platform with no pad just
+    // keeps the keyboard baseline.
+    bool enableGamepad(std::string* error = nullptr);
 
 private:
     SDL_Window* window_ = nullptr;
     bool closed_ = false;
+    int gamepad_ = 0;   // SDL's gamepad handle is an SDL_JoystickID; 0 means no pad adopted
 };
 
 }  // namespace oa::platform

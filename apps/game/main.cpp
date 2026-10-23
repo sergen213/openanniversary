@@ -103,10 +103,23 @@ int main(int argc, char** argv) {
         return 2;
     }
 
+    // --gamepad=true adopts the first connected gamepad (its identity is logged by the platform module);
+    // the named keys then answer from keyboard OR pad. Without the flag nothing polls a pad, so the
+    // keyboard baseline is untouched.
+    if (config.flag("gamepad", false)) {
+        std::string gamepadError;
+        if (!window.enableGamepad(&gamepadError))
+            OA_LOG(oa::LogLevel::Warn, "app", "no gamepad: {}", gamepadError);
+    }
+
     oa::render::VkRenderer renderer;
     oa::render::RendererConfig renderConfig;
     renderConfig.applicationName = windowConfig.title;
     renderConfig.validation = config.flag("vk.validation", true);
+    // --present=1 asks for the no-wait swap (uncapped presentation) instead of the default wait-for-
+    // vertical-blend one; it is a settings knob, not a gameplay one — the physics ticks are wall-clock
+    // paced and stay put while the picture rate changes, which is what the two runs below measure.
+    renderConfig.presentMode = config.integer("present", 0);
     // Shaders are compiled into build/shaders next to this executable; fall back to the working directory.
     std::filesystem::path shaderDirectory = "shaders";
     if (argc > 0) {

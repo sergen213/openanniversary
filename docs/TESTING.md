@@ -178,6 +178,15 @@ Four independent checks, because "it drew something" is not evidence:
 Validation-layer runs must be clean apart from the host's stale `liblsfg-vk-layer.so` loader messages documented in
 `docs/ENVIRONMENT.md`; anything else is a bug to fix, not to suppress.
 
+## 4b. Modernization toggles (settings path)
+
+Every modern feature is a flag that leaves the baseline untouched when absent, and each claim here is a measured number from a real run on this machine (KDE/Wayland, compositor scale 1.4, AMD Radeon RX 7900 XTX):
+
+* **HiDPI is real here** — every window line now prints both sizes: `window '…': logical 1600x900, device 2240x1260, pixel density 1.4`. The renderer works in device pixels end to end (swapchain `2240x1260`), so a scaled display renders sharper rather than resampled — the 1.4 factor comes from this desktop's compositor, and both numbers being logged is what makes the fact checkable on any machine.
+* **Ultrawide** — `--width=2560 --height=1080 --selfCheck=true --frames=1` on `pc-w\ma1.drm`: the window reports `logical 2560x1080, device 3584x1512, pixel density 1.4`, the swapchain follows at `3584x1512`, and both baseline probes plus the mesh probe (`3123/9216 pixels covered by 1775 distinct vertex colours, 0 unexplained`) still pass at the wider device size — the same geometry path, no aspect assumptions in it.
+* **Presentation mode** — `--present=1` asks the swapchain for the no-wait present instead of the default wait-for-vertical-blend one (with a Warn when a surface does not offer the requested mode and a fallback to the default). Two paced runs, ten real seconds each, `--level=ma1 --avatarDrive=true`: default mode presented `201 frame(s) … (20.2 fps)`; `--present=1` presented `90446 frame(s) … (9159.1 fps)`. The gameplay clock did not follow the picture: both logs report `driven body at tick 120/240/360/480/…` at the same ~60 Hz wall-clock pace — frame-rate independence of gameplay, measured at a 450x presentation spread.
+* **Gamepad** — `--gamepad=true` adopts the first connected pad and logs its identity (name/vendor); the platform's `keyDown` then answers from keyboard OR pad (left stick and d-pad → the named direction keys and the WASD aliases, South jumps, East runs, shoulder buttons dolly). With the attached 8BitDo Ultimate powered off it reports honestly — `no gamepad: the platform reports no gamepad` — and the run continues with the keyboard baseline intact. A powered-on pad is verified against real hardware by a session (see `docs/ENVIRONMENT.md` §Devices).
+
 ## 5. Static analysis and warnings
 
 All targets compile with `-Wall -Wextra -Wpedantic -Wshadow -Wconversion` (`-Wno-missing-field-initializers` only, for

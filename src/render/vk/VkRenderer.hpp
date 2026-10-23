@@ -24,6 +24,7 @@ inline constexpr std::uint32_t kNoTexture = 0xFFFFFFFFu;
 struct RendererConfig {
     std::string applicationName = "OpenAnniversary";
     bool validation = true;            // VK_LAYER_KHRONOS_validation when the loader offers it
+    int presentMode = 0;               // 0: the wait-for-vertical-blend swap (default); 1: the no-wait swap
     std::array<float, 4> clearColour{{0.10f, 0.35f, 0.62f, 1.0f}};
     std::string shaderDirectory = "shaders";   // resolved against the executable's own directory by the caller
 };
@@ -162,6 +163,7 @@ private:
     bool createSurface(platform::Window& window, std::string* error);
     bool pickDevice(std::string* error);
     bool createSwapchain(int widthPixels, int heightPixels, std::string* error);
+    int presentMode_ = 0;   // RendererConfig::presentMode, kept so the resize path re-creates with the same setting
     void destroySwapchain(bool waitForIdle);
     bool createRenderTargets(std::string* error);
     bool createPipeline(std::string* error);

@@ -138,6 +138,10 @@ feature-flag vocabulary for Milestone 7 and a FourCC hint for the container rese
 `docs/RESEARCH.md` §7. [V-data] — reading our own prefix; the launch-semantics half of it (settings live in that
 registry key, `tra.exe -setup` opens the dialog) is prior-community [S] via pcgamingwiki.com's TR Anniversary page.
 
+## Input devices
+
+An 8BitDo Ultimate Wireless Controller sits on its USB dongle here: `/dev/input/by-id/usb-8BitDo_Ultimate_Wireless_Controller_…-hidraw` stays registered while its HID interface does, but the hidraw node only exists while the controller is powered on [V-data]. SDL reports no pad then — `--gamepad=true` says `no gamepad: the platform reports no gamepad` and the run keeps the keyboard baseline, which is why an unpowered controller is not evidence either way. For the real-device check: power the controller on and run `oa-game … --gamepad=true --avatarDrive=true` — the run must log `gamepad '8BitDo Ultimate Wireless Controller' vendor … adopted`, and a held left stick must move the driven body with the same `driven body at tick N` reports the keyboard produces [to-verify-on-device].
+
 ## Display and visual verification
 
 * KDE Plasma on Wayland (`$WAYLAND_DISPLAY=wayland-1`, compositor `kwin_wayland`); an XWayland bridge answers at
