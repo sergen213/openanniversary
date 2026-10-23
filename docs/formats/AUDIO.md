@@ -96,3 +96,18 @@ Statistics have been exhausted; two concrete evidence paths remain, in order of 
 The ADPCM facts in §3 have been written against: §3's block-path decoder now ships in `src/cdc/Sound.*`. For the `.mul` family
 nothing unverified has shipped: an unverified guess there would silently corrupt every stream sound, so the winmm capture above
 stays the next audio experiment.
+
+## 6. The container's own words and the arithmetic that closes a record **[V-exe/V-data, 2026-10-22]**
+
+Two literals next to each other in the constant pool: `%s%s.mul` at 0x6503b8, and beside `%s%s.raw` at 0x6523a8 the
+fragment `%ssndstrm\` — the game opens sound streams as `<prefix>sndstrm\<name>.raw`, a path family the 406 area-code
+names never reached. 5,850 candidates (area codes and the 949 objectlist names against `.raw`/`.mul`, and numeric names
+0..999 under `sndstrm\`) all hash to zero records: the stream names are not area codes, not object names, not numbers.
+Their owner is still unread [V-data].
+
+The size arithmetic of the family-1 reference `001AA4B3` closes exactly against its own header: 15,616 samples = 244
+blocks × 64, and 0x800 + 244×36 + 640 = 11,472 = the record's byte size. So the payload IS 244 of the engine's
+36-byte blocks plus a 640-byte remainder — but no fixed stride explains it: spread strides 37..47 each keep only
+50-60% of the step-byte rule. The 640 bytes are not spread evenly between the blocks [V-data]; a per-block side entry
+would be 2.62 bytes, which is not an integer. The framing question stays open, now with the block count pinned
+rather than guessed.
