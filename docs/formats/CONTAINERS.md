@@ -115,8 +115,27 @@ Result: 948 of the 949 object-list units resolve, reproducible with
 oa-asset "<install>" resolve candidate-paths.txt   # matched 948 of 949 candidate paths
 ```
 
-The remaining ~3,350 records (textures, sound, movies, text) still need name candidates; that is the open item
-tracked in `docs/ROADMAP.md`.
+### 6.1 Level naming and the chapter table **[V-data]** (2026-10-23)
+
+The level list is not a loose file — it is `pc-w\generalbank.drm` (`0xB3AAAFD6`), section-0 image, 400-byte-stride rows
+starting at image offset 4,388: `+0x00` a key (`chapter0`…`chapter4`, then `level1`…`level4` per chapter), `+0x20` a
+level code. Chapter starts: `chapter0→ma1`, `chapter1→cn2`, `chapter2→cn4`, `chapter3→cn9`, `chapter4→cn8`; the
+`levelN` rows give each chapter's ordered openings `(pu1,pu8,pu11,pu16)`, `(gr1,gr31,gr18,gr27)`, `(eg1,…)`, `(lc1,…)`
+and a zone table further on (offsets ~17,440–20,896) lists every area code: `pu1…pu23`, `gr1…gr32`, `eg1…eg32`,
+`lc1…lc20`, `cn1…cn9`, `ma1`.
+
+Those codes are the unit names: `pc-w\<code>.drm` hashes to the real level records — `pc-w\cn3.drm` = `0x8BAF540E`
+(16,532,812 bytes, a unit the geometry path already decodes), `pc-w\ma1.drm` = `0x5526C48B`, etc. Reproduce with
+`oa-asset "<install>" resolve <codes-as-candidates>` (406 candidates, all large `.drm` units matched).
+
+The code path agrees **[V-exe]**: `tra.exe` reads the arg record `\TRAE\game\pc\TRAE.arg` (43 bytes, shipped content
+`pu 1 -mainmenu -srconfig="PC-W" -debugmenus`) and parses `-chapter N` / `-chaptervars N` into globals
+(`DAT_00838864/68`), which call `FUN_004227e0(chapter-1, 0)`; that routine indexes
+`chapter*400 + *(obj+0x1c)` — the object comes from the generalbank unit (`DAT_00812c68 = *(iVar1+8)+0x44` in
+`FUN_0045f6e0`) — copies the row names to `DAT_008383fc`/`DAT_00895404+0x10` (current/next area), and level data
+files are opened through the `%s%s.raw` / `%s%s.mul` name templates (`DAT_0086330c` prefix + area name).
+The `levelN` rows themselves use a 212-byte stride; only their two string fields are used here — the rest of that
+row layout stays open.
 
 ## 7. Payload identity after extraction **[V-data]**
 
