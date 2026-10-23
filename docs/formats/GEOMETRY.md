@@ -910,3 +910,20 @@ Reproduce: `./build/oa-game --gameDir="<install>" --mesh=8baf540e --strips=true 
 --frames=1` then read the two "--textures:" info lines and count "names page id" warns; group table offsets come from
 `oa-asset terrper --hash 8baf540e` (group-record block) plus `oa-asset drm --hash 8baf540e --section d4 --out ...`'s
 relocation lines.
+
+## 34. Two whole-archive cross-checks kill the obvious namespaces for the leftover page ids **[V-data]**
+
+§33 left seven class-32 values unresolved on `8baf540e` (id **9,722** x2 and one each of
+**10,199 / 10,211 / 10,343 / 10,346 / 10,361 / 10,397**, plus **35,009** on a no-triangle material). Measured today
+over the whole install (every record's `oa-asset drm` dump once): none of those values is the section **id column of
+ANY type** in any of the 1,098 v14 units - not just type 5 as §33 claimed, every directory row was checked. They are
+also not bigfile record hashes: no exact hit among the 4,304 record hashes, and none matches either 16-bit half of
+one. So that namespace is neither directory-id space nor a path-hash handle - the only shipped selector §29's [V-exe]
+reading still offers for whole terrains is `**(sceneNode + 8)` feeding ONE texture handle per drawn group through
+`FUN_0046f5f0` / `FUN_0046f6b0` (stride-0xB0 record walks calling `FUN_0040d390(terrainObject, groupRecord)`), whose
+object-side handle resolution stays unread. Question (b) keeps exactly these values open with both cheap hypotheses
+ruled out; stop re-testing them and read the resource-handle loader in `tra.exe` if it ever matters.
+
+Reproduce the negatives: for each record of `./build/oa-asset "<install>" list`, run
+`./build/oa-asset "<install>" drm --hash <h> --mask <m>` and grep its section directory's id column; separately dump
+every record hash and compare exact plus both 16-bit halves.
