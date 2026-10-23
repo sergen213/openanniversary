@@ -484,6 +484,7 @@ int main(int argc, char** argv) {
                     const oa::cdc::DrmSection& sec = drm.sections()[s];
                     if (sec.stored && sec.type == 5) pageSlot[sec.id] = s;
                 }
+                std::size_t boundFromZeroWord = 0u, boundFromTwelveWord = 0u;   // §33: which record slot resolved the page
                 for (const auto& entry : runs) {
                     oa::render::MeshBatch batch;   // defaults: no page bound (white, colours only)
                     batch.indexStart = static_cast<std::uint32_t>(groupedIndices.size());
@@ -492,7 +493,15 @@ int main(int argc, char** argv) {
                     const std::int32_t materialId = entry.first.second;
                     const bool namedByTable = treeTable != nullptr && materialId >= 0 &&
                                              static_cast<std::size_t>(materialId) < treeTable->classValue.size();
-                    const std::uint32_t packed = namedByTable ? treeTable->classValue[static_cast<std::size_t>(materialId)] : 0u;
+                    const std::uint32_t cv = namedByTable ? treeTable->classValue[static_cast<std::size_t>(materialId)] : 0u;
+                    const bool hasPw = namedByTable && static_cast<std::size_t>(materialId) < treeTable->pageWord.size();
+                    const std::uint32_t pw = hasPw ? treeTable->pageWord[static_cast<std::size_t>(materialId)] : 0u;
+                    // §33 measured: the shipped group framing keeps its class/value page key at record +0 - our base-aligned
+                    // records see it eight bytes BEFORE the base slot - while §21's detector reads +12. Try both, preferring
+                    // +12 so already-resolved pages never move; fall to +0 only when +12 misses this unit's page ids.
+                    const auto class32Hits = [&](std::uint32_t p) { return (p >> 16u) == 32u && pageSlot.find(p & 0xFFFFu) != pageSlot.end(); };
+                    const bool useZeroWord = !class32Hits(cv) && hasPw && class32Hits(pw);
+                    const std::uint32_t packed = useZeroWord ? pw : cv;
                     const uint32_t idClass = packed >> 16u, pageId = packed & 0xFFFFu;
                     if (idClass == 32u) {   // §21: class 32 names the texture page; other classes stay open
                         const auto named = pageSlot.find(pageId);
@@ -526,7 +535,10 @@ int main(int argc, char** argv) {
                                     OA_LOG(oa::LogLevel::Warn, "app", "--textures: material {}'s id {} resolves to section {}, which is not a decodable PCD9: {}", materialId, pageId, named->second, why);
                                 }
                             }
-                            if (known != pageById.end()) batch.material = known->second;
+                            if (known != pageById.end()) {
+                                batch.material = known->second;
+                                if (useZeroWord) ++boundFromZeroWord; else ++boundFromTwelveWord;
+                            }
                         }
                     }
                     groupedIndices.insert(groupedIndices.end(), entry.second.begin(), entry.second.end());
@@ -534,6 +546,7 @@ int main(int argc, char** argv) {
                 }
                 OA_LOG(oa::LogLevel::Info, "app", "--textures: {} material(s) grouped into {} batch(es) over {} distinct PCD9 page(s) from named sections",
                        runs.size(), materialBatches.size(), materialPages.size());
+                OA_LOG(oa::LogLevel::Info, "app", "--textures: page keys resolved from record +0: {}(material(s), from +12: {}(material(s)", boundFromZeroWord, boundFromTwelveWord);
             }
         }
 

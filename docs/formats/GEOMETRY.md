@@ -882,3 +882,31 @@ frustum test (§31) is the only face-level removal that ships.
 
 Reproduce: `./build/oa-game --gameDir="<install>" --selfCheck=false --frames=3` and read the "boot level:" line;
 `scripts/ci.sh` runs exactly that whenever an install is present and fails on a missing "boot level:".
+
+
+## 33. The shipped material record's page key sits at record +0 - nine more runs bind pages **[V-data] [V-gpu]**
+
+§29's framing (`list = *(group + 0x90)` payload offset from the group's kind-0 reloc, `rec = list + 4 + matIdx * 0x14`)
+put the vertex base at rec + 8. Reading the same records from their true start shows what lives where: word 0 of a record is
+itself a packed `(class << 16 | value)` pair - e.g. section 218's list at payload offset 0x4B4 (addend straight from the
+terrain-array relocations) holds two records `0x2008b2` / `0x2008b3`: class 32, values 2,226 and 2,227, both real type-5
+ids of this unit - while §21's detector read the +12 slot for that pair. Both framings are now consulted in
+`apps/game/main.cpp`'s texture binding: class/value candidates come from record +0 (`TerrainMaterialList::pageWord`, filled
+in `decodeTerrainMaterialBases()` at base-slot-minus-eight) and +12, with +12 kept as the primary so nothing that bound
+before can move; a run falls to the +0 key only when its +12 word misses this unit's page-id namespace while its +0 word is
+class 32 AND names an existing type-5 id (no blind second chances).
+
+Measured on `8baf540e --strips=true --textures=true` (2026-10-23, RX 7900 XTX): unresolved class-32 warn lines drop from
+16 to 7 (distinct missing ids 10,199 / 10,211 / 10,343 / 10,346 / 10,361 / 10,397 / 35,009 down to the first three of those
+families), distinct PCD9 pages rise 60 -> 61, and the split reads "page keys resolved from record +0: 39(material(s),
+from +12: 111(material(s)". On `4956BEA0` (no group array, hybrid fallback): 19 materials resolve via +0 against 110 via
++12, and the id-9,722 cluster shrinks from three warn lines to two.
+
+What stays open: ids in the tens of thousands (10,199 / 10,343 / 10,346 on this unit; 9,722 on the hall) name NO type-5
+id in ANY of the install's 1,098 v14 units' directory columns (measured by scanning every record's `drm` dump once), so
+that namespace is neither the section-id space nor a cross-unit bank - it is still question (b)'s remainder, just smaller.
+
+Reproduce: `./build/oa-game --gameDir="<install>" --mesh=8baf540e --strips=true --textures=true --selfCheck=false
+--frames=1` then read the two "--textures:" info lines and count "names page id" warns; group table offsets come from
+`oa-asset terrper --hash 8baf540e` (group-record block) plus `oa-asset drm --hash 8baf540e --section d4 --out ...`'s
+relocation lines.

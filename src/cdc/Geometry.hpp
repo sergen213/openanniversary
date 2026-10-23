@@ -138,6 +138,9 @@ struct TerrainMaterialList {
     // classes name ids in a second namespace that is neither the directory nor the object list. Nothing here decides
     // what a class means - the caller checks before it looks anything up.
     std::vector<std::uint32_t> classValue;
+    // The shipped group framing (§29) keeps the (class << 16 | value) page key at record +0 - eight bytes BEFORE the
+    // base slot our detector aligns on. Kept raw like classValue; callers decide what a class means.
+    std::vector<std::uint32_t> pageWord;
 };
 
 // Reads that table from one section payload. Refuses rather than guesses: fewer than eight relocation slots at a stride
