@@ -1809,10 +1809,44 @@ void VkRenderer::drawMeshGeometry(VkCommandBuffer command) const {
         vkCmdBindIndexBuffer(command, meshIndexBuffer_, 0, VK_INDEX_TYPE_UINT32);
         if (!meshBatches_.empty()) {
             // One draw per material run, each bound to that material's page: the first experiment in
-            // docs/formats/GEOMETRY.md §23, where a class-32 material's +12 names its page by section id.
+            // docs/formats/GEOMETRY.md §23. §31 adds the shipped visibility test on top (docs GEOMETRY.md §29 [V-exe]:
+            // sphere-versus-frustum ONLY - no distance, depth or LOD swap anywhere in tr7's terrain walk), so a batch
+            // whose bounding sphere lies outside any plane of THIS frame's view-projection matrix never issues its
+            // draw call. The planes are read straight off buildMeshMatrix()'s matrix, the very one pushed as the vertex
+            // constant, so culling and shading cannot drift apart; a batch built without a bound (negative radius)
+            // always draws, which keeps every older path byte-identical.
+            const auto matrix = buildMeshMatrix();
+            float planes[6][4];   // Gribbush rows over this column-major matrix: inside means dot(plane, p_h) >= -radius
+            for (int i = 0; i < 4; ++i) {
+                const float r0 = matrix[i], r1 = matrix[4 + i], r2 = matrix[8 + i], r3 = matrix[12 + i];   // element(row, col)
+                planes[0][i] = r3 + r0;   // left:   w + x >= 0
+                planes[1][i] = r3 - r0;   // right:  w - x >= 0
+                planes[2][i] = r3 + r1;   // bottom: w + y >= 0
+                planes[3][i] = r3 - r1;   // top:    w - y >= 0
+                planes[4][i] = r2;        // near:   z >= 0 (this pass maps depth into [0,1], not [-w,w])
+                planes[5][i] = r3 - r2;   // far:    w - z >= 0
+            }
+            for (auto& plane : planes) {
+                const float len = std::sqrt(plane[0] * plane[0] + plane[1] * plane[1] + plane[2] * plane[2]);
+                if (len == 0.0f) { plane[0] = plane[1] = plane[2] = plane[3] = 0.0f; continue; }   // a degenerate row vetoes nothing
+                for (float& coefficient : plane) coefficient /= len;                                // radius then compares in world units
+            }
+            const auto outside = [&](const MeshBatch& batch) {
+                if (!(batch.bound[3] >= 0.0f)) return false;   // unbuilt bound: always draw (ponytail: no per-batch recompute here, uploadMesh fills bounds once)
+                for (const auto& plane : planes) {
+                    const float planeOffset = plane[0] * batch.bound[0] + plane[1] * batch.bound[1] + plane[2] * batch.bound[2] + plane[3];
+                    if (planeOffset < -batch.bound[3]) return true;   // whole sphere beyond this plane
+                }
+                return false;
+            };
+            meshDrawn_ = 0;
+            meshCulled_ = 0;
+            const bool cullThisFrame = camera_.fovDegrees > 0.0f;   // §31: only a perspective view frustum-culls; the orthographic fit IS the probe framing, so --meshDump and the offscreen pictures §6/§23 document stay byte-identical when it is off
             for (const MeshBatch& batch : meshBatches_) {
+                if (cullThisFrame && outside(batch)) { ++meshCulled_; continue; }
                 bindPage(batch);
                 vkCmdDrawIndexed(command, batch.indexCount, 1, 0, batch.indexStart, 0);
+                ++meshDrawn_;
             }
             return;
         }
@@ -2006,6 +2040,33 @@ bool VkRenderer::uploadMesh(const MeshUpload& mesh, std::string* error) {
         meshMaterials_.push_back(material);
     }
     meshBatches_ = mesh.batches;
+    // §31's per-batch spheres, computed here so a caller cannot forget them and every path shares one definition: the
+    // shipped engine tests these against the frustum only (§29 [V-exe]); the sphere is the bounding box of the run's
+    // vertices with the radius out to a corner, because over-approximating beats culling visible geometry.
+    if (!meshBatches_.empty() && indexed) {
+        const auto* records = static_cast<const std::int16_t*>(mesh.bytes);   // stride 20: i16 x, y, z then the rest (§2)
+        for (auto& batch : meshBatches_) {
+            int lo[3] = {32767, 32767, 32767};
+            int hi[3] = {-32768, -32768, -32768};
+            for (std::uint32_t slot = batch.indexStart; slot < batch.indexStart + batch.indexCount; ++slot) {
+                const std::int16_t* record = records + 10 * static_cast<std::size_t>((*mesh.indices)[slot]);
+                for (int axis = 0; axis < 3; ++axis) {
+                    const int value = record[axis];
+                    if (value < lo[axis]) lo[axis] = value;
+                    if (value > hi[axis]) hi[axis] = value;
+                }
+            }
+            if (hi[0] >= lo[0]) {   // an empty run keeps the default bound and always draws
+                float radius = 0.0f;
+                for (int axis = 0; axis < 3; ++axis) {
+                    batch.bound[axis] = 0.5f * static_cast<float>(lo[axis] + hi[axis]);
+                    const float half = 0.5f * static_cast<float>(hi[axis] - lo[axis]);
+                    radius += half * half;
+                }
+                batch.bound[3] = std::sqrt(radius);   // to the box corner, not the mean edge
+            }
+        }
+    }
     if (!meshBatches_.empty()) {
         OA_LOG(LogLevel::Info, "vk", "mesh materials uploaded: {} page(s) for {} batch(es), white-bound batches draw colours alone",
                meshMaterials_.size(), meshBatches_.size());
@@ -2024,7 +2085,7 @@ bool VkRenderer::uploadMesh(const MeshUpload& mesh, std::string* error) {
     return true;
 }
 
-void VkRenderer::pushMeshMatrix(VkCommandBuffer command) const {
+std::array<float, 16> VkRenderer::buildMeshMatrix() const {
     // World to view: yaw about Z? The archive stores levels in its own axis convention, and which way is up has not
     // been established from the executable yet [INFERENCE], so the camera orbits and lets the picture say.
     const float cy = std::cos(camera_.yaw);
@@ -2070,7 +2131,7 @@ void VkRenderer::pushMeshMatrix(VkCommandBuffer command) const {
         k[2] = 0.5f;   // centre the orthographic depth range on the target
         k[3] = 1.0f;
     }
-    float matrix[16]{};
+    std::array<float, 16> matrix{};
     for (int column = 0; column < 3; ++column) {
         for (int row = 0; row < 4; ++row) matrix[column * 4 + row] = m[row][column];
     }
@@ -2082,7 +2143,12 @@ void VkRenderer::pushMeshMatrix(VkCommandBuffer command) const {
     }
     // matrix[15] is the constant of the w row, which the loop above already wrote (the orthographic path's k[3] is 1.0
     // and its m[3] is zero, so it stays 1 there; perspective needs `distance`, not a hardcoded 1).
-    vkCmdPushConstants(command, meshLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(matrix), matrix);
+    return matrix;
+}
+
+void VkRenderer::pushMeshMatrix(VkCommandBuffer command) const {
+    const auto matrix = buildMeshMatrix();   // §31's cull planes come out of this same matrix so the two paths cannot drift apart
+    vkCmdPushConstants(command, meshLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(matrix), matrix.data());
 }
 
 bool VkRenderer::renderMeshOffscreen(std::vector<std::byte>* outRgba, uint32_t size, std::string* error) {

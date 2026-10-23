@@ -57,6 +57,7 @@ struct MeshBatch {
     std::uint32_t indexStart = 0;   // first index of this material's run inside MeshUpload::indices
     std::uint32_t indexCount = 0;   // whole triangles times three
     std::uint32_t material = kNoTexture;   // index into MeshUpload::materials
+    float bound[4] = {0.0f, 0.0f, 0.0f, -1.0f};   // §31's sphere (centre xyz then radius); a negative radius means unbuilt and always draws
 };
 struct MeshUpload {
     const void* bytes = nullptr;
@@ -123,6 +124,8 @@ public:
 
     // Called when the drawable size changes; recreation is deferred to the next frame like the game does it.
     void notifyResize(int widthPixels, int heightPixels);
+    // §31's counts from the most recent batch loop: {drawn, culled}. The shipped engine tests sphere-versus-frustum per terrain group/node with no distance or LOD swap (docs/formats/GEOMETRY.md §29 [V-exe]).
+    std::pair<std::size_t, std::size_t> meshCullStats() const { return {meshDrawn_, meshCulled_}; }   // counters are mutable so a const frame can report them
 
     // Acquires an image and records+submits a clear pass. Returns false when this frame has nothing to present
     // (resize pending, timeout); the caller then simply skips presentation for one iteration.
@@ -184,6 +187,8 @@ private:
     bool uploadSampledImage(const TextureUpload& texture, VkImage* image, VkDeviceMemory* memory,
                             VkImageView* view, std::string* error);
     void pushMeshMatrix(VkCommandBuffer command) const;
+    // The world->clip matrix the mesh pass pushes as a constant; §31's cull planes come out of this same matrix so the two paths can never drift apart.
+    std::array<float, 16> buildMeshMatrix() const;
     // Binds the mesh pipeline plus its vertex (and index, when there is one) buffers and issues the draw; both the
     // swapchain pass and the offscreen probe call it. With batches, one draw per material run, each with that
     // material's page bound (white when it names none).
@@ -248,6 +253,8 @@ private:
     std::vector<MeshMaterial> meshMaterials_;
     MeshMaterial meshWhite_;
     std::vector<MeshBatch> meshBatches_;
+    mutable std::size_t meshDrawn_ = 0;    // §31's per-frame counts so a caller can report them without logging every frame
+    mutable std::size_t meshCulled_ = 0;
     VkSampler meshSampler_ = VK_NULL_HANDLE;   // wrapped: terrain UVs tile past one page
     VkDescriptorSetLayout meshSetLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool meshPool_ = VK_NULL_HANDLE;

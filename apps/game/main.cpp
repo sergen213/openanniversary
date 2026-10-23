@@ -961,6 +961,11 @@ int main(int argc, char** argv) {
         // offscreen probe and the dumps depend on.
         if (const std::string fov = config.str("fov"); !fov.empty()) camera.fovDegrees = std::strtof(fov.c_str(), nullptr);
         camStep = 0.02f * std::max({frameMax[0] - frameMin[0], frameMax[1] - frameMin[1], frameMax[2] - frameMin[2]});
+        // --panX/panY/panZ slide the look-at target in world units (keyboard WASD pans from here at runtime); a headless
+        // run needs them so §31's cull counts can face one end of a level instead of framing all of it.
+        if (const std::string v = config.str("panX"); !v.empty()) panTarget[0] = camera.panX = std::strtof(v.c_str(), nullptr);
+        if (const std::string v = config.str("panY"); !v.empty()) panTarget[1] = camera.panY = std::strtof(v.c_str(), nullptr);
+        if (const std::string v = config.str("panZ"); !v.empty()) panTarget[2] = camera.panZ = std::strtof(v.c_str(), nullptr);
         renderer.setMeshCamera(camera);
         OA_LOG(oa::LogLevel::Info, "app", "camera keys: arrows orbit, WASD slide the look-at target, Q/E dolly; "
                                          "{} projection at yaw {:.2f} pitch {:.2f} zoom {:.2f}",
@@ -1199,6 +1204,11 @@ int main(int argc, char** argv) {
             ++frames;
         }
         if (frameLimit > 0 && frames >= frameLimit) break;
+    }
+    // §31's shipped visibility rule in numbers for the last drawn frame: sphere-versus-frustum only, exactly what
+    // tr7's terrain walk does (docs/formats/GEOMETRY.md §29 [V-exe]) - no distance or LOD swap exists there.
+    if (const auto [drawn, culled] = renderer.meshCullStats(); drawn + culled > 0u) {
+        OA_LOG(oa::LogLevel::Info, "app", "mesh cull on the last frame: {} batch(es) drawn, {} culled of {}", drawn, culled, drawn + culled);
     }
     const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
 

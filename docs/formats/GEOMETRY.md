@@ -846,3 +846,15 @@ Read through the pseudocode's OWN offsets (rec = list + 4 + matIdx * 0x14, base 
 - The three linked-but-undetected tables (sections 218/209/215 on `8baf540e`) draw with WHITE-bound materials: §20's detected-run fetch has no class/value words to key for them, so their strips keep the default page until question (b)'s second namespace is pinned. The texture-binding warnings list on this unit drops to the same 16 class-32 ids as before [V-gpu].
 
 Commands: `./build/oa-game --gameDir="<install>" --mesh=8baf540e --strips=true --avatar=true --selfCheck=true --frames=1` and the terrper pairing rows via `./build/oa-asset "<install>" terrper --hash 8baf540e` (the `group-record` block at its tail).
+
+## 31. Frustum culling of the material batches ships in `oa-game` - measured [V-data] [V-gpu]
+
+Milestone 4's open clause said "culling - every chain draws whether seen or not"; §29's [V-exe] read now says what the shipped test IS (sphere-versus-frustum only, no distance/depth/LOD swap), so `VkRenderer::drawMeshGeometry()` does exactly that per material batch:
+
+- `uploadMesh` computes each batch's bounding sphere from its own run's vertices in the uploaded stride-20 records - box centre plus a radius out to the corner, i.e. deliberately over-approximating so nothing visible can be dropped [V-data].
+- The six planes are read straight off `buildMeshMatrix()`'s world->clip matrix - the very one pushed as the vertex constant in the same command buffer - so culling and shading cannot drift apart; near is `z >= 0` because this pass maps depth into [0,1], not [-w,w] (the comment at `pushMeshMatrix` records that convention).
+- Only a perspective view culls: with `--fov=0` the orthographic fit IS the probe framing, so every dump/offscreen path §6 and §23 document stays byte-identical (measured below).
+- Measured on `8baf540e --strips=true --textures=true` (179 batches / 60 pages, 2026-10-23): orthographic self-check run "179 batch(es) drawn, 0 culled of 179"; centred `--fov=60` "168 drawn, 11 culled"; `--fov=60 --panX=-15000` "57 drawn, 122 culled"; `--fov=45 --zoom=0.25 --yaw=2.0` "53 drawn, 126 culled" - counts move with the view in every direction, and a batch straddling any plane stays drawn because its sphere is tested against `-radius`, not the centre [V-gpu].
+- Granularity honesty: the shipped walk tests oct-tree nodes and terrain GROUPS (§29's recursion), while this culls per material run - coarser, so `oa-game` draws a superset of what the engine would keep, never a subset. Per-node culling needs the tree's own cell bounds at draw time, which the renderer does not carry yet; that is the upgrade path if batch-level counts ever stop being enough.
+
+Reproduce: `./build/oa-game --gameDir="<install>" --mesh=8baf540e --strips=true --textures=true --fov=60 --panX=-15000 --selfCheck=false --frames=1` then read the "mesh cull on the last frame" line.
