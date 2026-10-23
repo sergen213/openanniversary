@@ -858,3 +858,27 @@ Milestone 4's open clause said "culling - every chain draws whether seen or not"
 - Granularity honesty: the shipped walk tests oct-tree nodes and terrain GROUPS (§29's recursion), while this culls per material run - coarser, so `oa-game` draws a superset of what the engine would keep, never a subset. Per-node culling needs the tree's own cell bounds at draw time, which the renderer does not carry yet; that is the upgrade path if batch-level counts ever stop being enough.
 
 Reproduce: `./build/oa-game --gameDir="<install>" --mesh=8baf540e --strips=true --textures=true --fov=60 --panX=-15000 --selfCheck=false --frames=1` then read the "mesh cull on the last frame" line.
+
+## 32. `oa-game` boots into the game's own opening area with only a `--gameDir` **[V-data] [V-gpu]**
+
+The scene no longer needs a hash on the command line: with `--gameDir` set and neither `--mesh` nor `--level`,
+`apps/game/main.cpp` opens `pc-w\generalbank.drm`, walks §6.1's 400-byte rows from section-0 image offset 4,388 and
+takes the code at +0x20 off the row keyed `chapter0`. On this install that reads back as `ma1` - the chapter table's
+documented start (Croft Manor) **[V-data]** - so the mesh path becomes `pc-w\ma1.drm` (`0x5526C48B`, CONTAINERS.md §6.1),
+and the boot path also switches on the strip walk and material pages so one flagless run draws real shipped surfaces.
+
+Measured 2026-10-23 with `--selfCheck=false --frames=3`: "boot level: 'pc-w\ma1.drm' (ma1)", then
+"2 terrain tree(s): 428 leaf reference(s) reached 1223 record(s), drawing 31481 of 31594 triangle(s) over 40610 vertex/vertices",
+then "86 material(s) grouped into 86 batch(es) over 40 distinct PCD9 page(s)" with one warn - material 78 names page id
+9972 the unit does not store, exactly §30's open question b, and that batch draws its shipped vertex colour instead. The
+fallback general-section draw reports "40610 vertices, 13536 triangles" and all "86 batch(es) drawn, 0 culled of 86"; three
+frames present on the RX 7900 XTX **[V-gpu]**.
+
+What this is NOT: no spawn position or camera framing comes from the table - §6.1's own honesty line says the level rows'
+other fields stay open, so the camera keeps this file's documented default (orthographic fit at yaw 0.70 pitch 0.40 zoom
+1.00 unless `--fov`/`--pan` flags say otherwise). Nothing is culled by winding either: `createMeshPipeline()` keeps
+`VK_CULL_MODE_NONE`, because a guessed cull plane would delete half of every level before it exposed the order - the
+frustum test (§31) is the only face-level removal that ships.
+
+Reproduce: `./build/oa-game --gameDir="<install>" --selfCheck=false --frames=3` and read the "boot level:" line;
+`scripts/ci.sh` runs exactly that whenever an install is present and fails on a missing "boot level:".
