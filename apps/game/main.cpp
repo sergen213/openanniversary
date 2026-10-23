@@ -9,6 +9,8 @@
 #include "cdc/Texture.hpp"
 #include "core/Config.hpp"
 #include "core/Log.hpp"
+#include "cdc/Sound.hpp"
+#include "platform/Audio.hpp"
 #include "platform/Window.hpp"
 #include "render/vk/VkRenderer.hpp"
 
@@ -993,6 +995,63 @@ int main(int argc, char** argv) {
                 OA_LOG(oa::LogLevel::Error, "app", "mesh probe failed: empty or unexplained coverage");
                 return 2;
             }
+        }
+    }
+    // --sound=true runs the engine's own decoder over the module's fixture blocks and hands the
+    // decoded tone to the platform's audio device; --wavOut=<path> additionally writes the same
+    // PCM as a WAV so it can be compared byte-for-byte outside the process. The record framing
+    // stays open (docs/formats/AUDIO.md §4-§6), so this proves the pipeline and the decoder —
+    // not record playback; the fixture's 44100 rate is our own choice, not the engine's.
+    if (config.flag("sound", false)) {
+        constexpr unsigned fixtureRepeats = 200u;   // 0.29 s of the fixture at 44100 Hz: audible, and short
+        std::vector<std::uint8_t> fixture(fixtureRepeats * 36u);
+        for (unsigned i = 0u; i < fixtureRepeats; ++i) {
+            const auto block = oa::cdc::makeAdpcmBlock(1000, 5, 0x31, 0x9F);
+            std::copy(block.begin(), block.end(), fixture.begin() + fixtureRepeats * 0u + i * 36u);
+        }
+        std::vector<std::int16_t> pcm(fixtureRepeats * 64u);
+        oa::cdc::decodeAdpcmBlocks({reinterpret_cast<const std::byte*>(fixture.data()), fixture.size()}, pcm.data());
+        const std::int16_t worked[4] = {1000, 1010, 991, 984};   // tests/test_sound.cpp asserts the same
+        if (!std::equal(worked, worked + 4, pcm.begin())) {
+            OA_LOG(oa::LogLevel::Error, "app", "sound self-check: decoded fixture differs from the hand values");
+            return 2;
+        }
+        if (!config.str("wavOut").empty()) {
+            if (FILE* f = std::fopen(config.str("wavOut").c_str(), "wb")) {
+                const auto put = [&](unsigned v) {   // little-endian header, like the samples it wraps
+                    const unsigned char bytes[4] = {
+                        static_cast<unsigned char>(v & 0xFFu), static_cast<unsigned char>((v >> 8) & 0xFFu),
+                        static_cast<unsigned char>((v >> 16) & 0xFFu), static_cast<unsigned char>(v >> 24)};
+                    std::fwrite(bytes, 1u, 4u, f);
+                };
+                const unsigned pcmBytes = static_cast<unsigned>(pcm.size() * 2u);
+                std::fwrite("RIFF", 1u, 4u, f);
+                put(8u + pcmBytes);
+                std::fwrite("WAVEfmt ", 1u, 8u, f);
+                put(16u);
+                put(1u);
+                put(1u);
+                put(44100u);
+                put(88200u);
+                put(2u);
+                put(16u);
+                std::fwrite("data", 1u, 4u, f);
+                put(pcmBytes);
+                std::fwrite(pcm.data(), 1u, pcmBytes, f);
+                std::fclose(f);
+                OA_LOG(oa::LogLevel::Info, "app", "wrote {} PCM bytes as WAV to '{}'", pcmBytes, config.str("wavOut"));
+            } else {
+                OA_LOG(oa::LogLevel::Error, "app", "--wavOut path '{}' unwritable", config.str("wavOut"));
+                return 2;
+            }
+        }
+        oa::platform::Audio audio;
+        std::string audioError;
+        if (!audio.create(44100, &audioError)) {
+            OA_LOG(oa::LogLevel::Warn, "app", "no audio device: {}", audioError);
+        } else {
+            audio.push(pcm.data(), pcm.size());
+            OA_LOG(oa::LogLevel::Info, "app", "sound fixture: {} samples handed to the device", pcm.size());
         }
     }
     const int frameLimit = config.integer("frames", 0);

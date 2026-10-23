@@ -56,7 +56,7 @@ add_executable(oa-asset tools/oa-asset/main.cpp)
 target_link_libraries(oa-asset PRIVATE oa_cdc oa_core)
 
 # Native window/input layer (SDL3) and the Vulkan renderer.
-add_library(oa_platform STATIC src/platform/Window.cpp)
+add_library(oa_platform STATIC src/platform/Window.cpp src/platform/Audio.cpp)
 target_include_directories(oa_platform PUBLIC src)
 target_link_libraries(oa_platform PUBLIC oa_core SDL3::SDL3)
 

@@ -18,6 +18,7 @@
 // yet — its codec is still open (AUDIO.md §4/§5); this module decodes the
 // block path only.
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -34,6 +35,20 @@ namespace cdc {
 // engine allocates for the same call.
 void decodeAdpcmBlocks(std::span<const std::byte> payload,
                        std::int16_t* outSamples) noexcept;
+
+// Builds one 36-byte block's bytes so tests and the game share the exact fixture: seed little-endian at
+// [0..1], step index at [2], [4..5] open the first sample pair; the rest stays zero. Byte [3] is skipped
+// by the decoder — the reference quirk marked [S] above.
+inline std::array<std::uint8_t, 36> makeAdpcmBlock(std::int16_t seed, std::uint8_t stepIndex,
+                                                   std::uint8_t fourth, std::uint8_t fifth) {
+    auto block = std::array<std::uint8_t, 36>{};
+    block[0] = static_cast<std::uint8_t>(static_cast<std::uint16_t>(seed) & 0xFFu);
+    block[1] = static_cast<std::uint8_t>(static_cast<std::uint16_t>(seed) >> 8);
+    block[2] = stepIndex;
+    block[4] = fourth;
+    block[5] = fifth;
+    return block;
+}
 
 }  // namespace cdc
 }  // namespace oa
