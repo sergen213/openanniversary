@@ -69,6 +69,8 @@ G="/mnt/2nd4TB/TombRaiderAnniversary/Tomb Raider Anniversary"
 ./build/oa-asset "$G" drm --hash 187BB04C                  # any record; non-DRM records are refused by version
 ./build/oa-asset "$G" texture --path 'pc-w\lara.drm' --section 0 --out /tmp/oascan/tex0.png   # BC1 -> PNG
 ./build/oa-asset "$G" texture --path 'pc-w\lara.drm' --section 9 --out /tmp/oascan/tex9.png   # tag 0x15 mask, RGBA
+./build/oa-asset "$G" namescan --out /tmp/oascan/names.txt   # type-7 event keys -> sound banks (AUDIO.md §8)
+# stdout rows = 1,034 resolved records; stderr ends "matched=1034 unresolved=295"
 ```
 
 Measured here: **every one of the 4,304 records** was run through `drm` - the reproduction line and the resulting payload

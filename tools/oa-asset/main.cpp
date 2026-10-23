@@ -6,6 +6,7 @@
 //   oa-asset <game-dir> extract --hash HEX [--mask HEX] --out FILE
 //   oa-asset <game-dir> extract --path "pc-w\lara.drm" --out FILE
 //   oa-asset <game-dir> drm --path PATH | --hash HEX [--section N --out FILE]
+//   oa-asset <game-dir> namescan [--out FILE]             pair type-7 event keys with sound-stream records
 //   oa-asset <game-dir> texture --path PATH | --hash HEX [--section N] --out FILE.png
 //
 // Numbers are read as hexadecimal everywhere, including --section (--section 12 is unit section 18).
@@ -31,6 +32,7 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <set>
 #include <vector>
 
 namespace {
@@ -59,7 +61,7 @@ bool parseHex(const std::string& text, std::uint32_t& value) {
 
 bool parseArgs(int argc, char** argv, Options& opt, std::string& error) {
     if (argc < 3) {
-        error = "usage: oa-asset <game-dir> <list|hash|resolve|extract|drm|texture|terrain|terrper> [options]";
+        error = "usage: oa-asset <game-dir> <list|hash|resolve|extract|drm|namescan|texture|terrain|terrper> [options]";
         return false;
     }
     opt.directory = argv[1];
@@ -628,9 +630,78 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    if (opt.command == "namescan") {  // AUDIO.md §8 [V-exe]: FUN_00419a80 chain opens streams as `%s%s.mul` over the prefix table at 0x665090 (`event_triggered\`, `stingers\`, ...) and the fragment `%ssndstrm\` at 0x6523a8 sits in the same pool; type-7 payloads store the joined key, so a record's path is pc-w\ + sndstrm\ + key + .mul
+        std::map<std::string, std::pair<std::size_t, std::size_t>> occurrences;  // key -> (units naming it, first record index)
+        std::size_t unitsScanned = 0, t7Payloads = 0;
+        for (std::size_t i = 0; i < archive.records().size(); ++i) {
+            const auto data = archive.read(i, &error);
+            if (data.empty()) continue;
+            oa::cdc::DrmFile drm;
+            std::string drmError;
+            error.clear();
+            if (!oa::cdc::DrmFile::parse(data, &drm, &drmError)) continue;
+            ++unitsScanned;
+            for (const auto& section : drm.sections()) {
+                if (section.type != 7u || !section.stored) continue;
+                const auto payload = drm.payload(section);
+                ++t7Payloads;
+                // NUL-delimited runs whose whole charset is a path alphabet and that contain a backslash.
+                for (std::size_t at = 0; at < payload.size(); ++at) {
+                    const auto start = static_cast<unsigned char>(payload[at]);
+                    if (!((start >= 'A' && start <= 'Z') || (start >= 'a' && start <= 'z'))) continue;
+                    if (at != 0u && static_cast<unsigned char>(payload[at - 1u]) != 0u) continue;
+                    bool okRun = true;
+                    std::size_t end = at;
+                    int backslashes = 0;
+                    while (end < payload.size()) {
+                        const auto v = static_cast<unsigned char>(payload[end]);
+                        if (v == 0u) break;
+                        const bool alphaNum = (v >= 'a' && v <= 'z') || (v >= 'A' && v <= 'Z') || (v >= '0' && v <= '9');
+                        const bool sep = v == '_' || v == '.' || v == '-' || v == '\\';
+                        if (!alphaNum && !sep) { okRun = false; break; }
+                        if (v == '\\') ++backslashes;
+                        ++end;
+                    }
+                    if (!okRun || backslashes == 0 || end >= payload.size()) continue;
+                    std::string token;
+                    for (std::size_t k = at; k < end; ++k)
+                        token.push_back(static_cast<char>(static_cast<unsigned char>(payload[k])));
+                    auto& slot = occurrences[token];
+                    if (slot.second == 0u && i != 0u) slot.second = i;  // first owning record index, kept stable
+                    ++slot.first;
+                    at = end;
+                }
+            }
+        }
+        std::size_t matchedKeys = 0;
+        std::vector<std::string> written;
+        for (const auto& [key, seen] : occurrences) {
+            const std::string candidate = "pc-w\\sndstrm\\" + key + ".mul";
+            written.push_back(candidate);
+            if (const auto index = archive.find(candidate, oa::cdc::kMaskAll)) {
+                ++matchedKeys;
+                printRecord(archive.records()[*index], candidate.c_str());
+            } else {
+                std::fprintf(stderr, "unresolved key: %s in %zu unit(s), first record index %zu\n", key.c_str(), seen.first, seen.second);
+            }
+        }
+        if (!opt.out.empty()) {
+            std::FILE* out = std::fopen(opt.out.c_str(), "wb");
+            if (out == nullptr) return fail("cannot write " + opt.out);
+            for (const auto& line : written) {
+                std::fwrite(line.data(), 1, line.size(), out);
+                std::fwrite("\n", 1u, 1u, out);
+            }
+            std::fclose(out);
+        }
+        std::fprintf(stderr, "namescan: %zu units scanned, %zu type-7 payloads, %zu distinct keys, matched=%zu unresolved=%zu\n",
+                     unitsScanned, t7Payloads, occurrences.size(), matchedKeys, occurrences.size() - matchedKeys);
+        return 0;
+    }
     if (opt.command == "texture") {
         const auto index = findRecord(archive, opt);
         if (!index) return fail("texture needs --hash or --path that matches a record");
+
         const auto data = archive.read(*index, &error);
         if (data.empty() && !error.empty()) return fail(error);
 

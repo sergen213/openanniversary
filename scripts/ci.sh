@@ -76,6 +76,14 @@ if [[ -n "${OA_GAME_DIR:-}" ]]; then
         echo "FAIL: oa-game with only --gameDir loaded no boot level from generalbank.drm (GEOMETRY.md §32 regression)" >&2
         exit 1
     fi
+    # Naming regression: type-7 event keys pair with sound-stream records through the shipped template
+    # (AUDIO.md §8); the three-digit floor is what makes silent parser drift visible.
+    names_log="$scratch/namescan.log"
+    "$scratch/plain/oa-asset" "$OA_GAME_DIR" namescan --out /dev/null >"$names_log" 2>&1 || true
+    if ! grep -q 'matched=[0-9][0-9][0-9]' "$names_log"; then
+        echo "FAIL: oa-asset namescan matched fewer than a hundred sound-stream records (AUDIO.md §8 regression)" >&2
+        exit 1
+    fi
 fi
 echo "== 3/3 unit tests under ASan+UBSan =="
 # Display path is excluded here on purpose: vendor code (SDL/driver) leaks by design and would mask real findings.

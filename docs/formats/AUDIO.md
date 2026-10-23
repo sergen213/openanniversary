@@ -140,3 +140,38 @@ sampled records), but blocks read there pass structural sanity on only 17-24% of
 no offset with a sane majority (only trivial two-block tails score high). So standalone family-1 records carry an extra table
 or different block layout between header and stream; the loader path for them is unresolved, while the in-unit type-6 path
 above is what `FUN_005eca10` receives.
+
+## 8. Type-7 payloads carry the event keys that name the sound-stream banks - 1,034 records get paths **[V-data, V-exe, 2026-10-23]**
+
+The shipped creator chain (`FUN_00419a80`/`FUN_00419b00`/`FUN_00419b80` -> `FUN_004198d0`, AUDIO.md §2/§5) formats
+`%s%s.mul` (literal at 0x6503b8) against the prefix table at 0x665090 (`event_triggered\`, `stingers\`, `montages\`,
+`animation\`) and the sibling fragment `%ssndstrm\` sits in the same constant pool at 0x6523a8 (§6). The join is what type-7
+"name-bearing" payloads store: a single NUL-terminated key like `Event_triggered\time_bend_03.` (the trailing dot belongs to
+the key), so the record path is `pc-w\sndstrm\<key>.mul`. `oa-asset namescan` walks every version-fourteen unit's type-7
+payloads, harvests those keys, and pairs them with records through the archive's own case-folded hash (CONTAINERS.md §6).
+
+Measured on the install (2026-10-23): **1,098 units scanned, 37,871 type-7 payloads -> 1,329 distinct keys;
+matched=1,034, unresolved=295**. Resolved groups: `vo` 728, `event_triggered` 136, `stingers` 90, `music` 58,
+`ambience` 9, `animation` 7, `ui` 6. The two keys `ui\TRAE_main_theme_2.` and `ui\trae_main_theme_2.` fold to ONE hash
+(pathHash is ASCII case-insensitive), so 1,034 keys name **1,033 distinct records**. Unresolved groups: `vo` 293 plus two
+junk runs (`x\`). That closes the naming half of §7's open question for the `.mul` family and cuts CONTAINERS.md §8's
+"~3,350 records with no name candidate" by this thousand; textures (`.raw`) and movies (`.bik`/`.sch`) keep their templates open.
+
+What the named banks actually hold stays open **[V-data negative]**: two event banks (`8F2641D7`, `E956B8E6`, 66,048 B) start
+`{u32 44100, u32 FFFFFFFF, u32 55552, u32 2}` and a music bank (`C8374111`) starts `{44099, 0, 9592064, 2}` - read as
+rate/loopStart/streamLen/flags, the stream is the LAST `streamLen` bytes (gap 10,496 before it). Those tail bytes are NOT §7's
+twelve-byte-plus-blocks shape: whole-number-of-36 block sanity passes on only **17.0%** from the tail start and 18.5-18.7% from
+offsets 12/16/20, no zlib/gzip/bzip2/xz/PK magic occurs anywhere in the record (zero occurrences of each), entropy is 5.96 bits
+in the gap versus 6.45 in the stream, and the last 512 bytes of the gap hold no dword pointing inside the stream. So these banks
+carry a table or codec between header and stream that §7's negative half already refuses to guess at; `FUN_00419690`'s chunk
+callback (the 0x800-byte reader attached by the same creator) is the next lever, unchanged from §5 path 2.
+
+The unresolved voice keys are shipped references that name no record under `.mul`, `.raw`, or bare decoration: `VO\Lara\B_L_FLL_S_02`
+lives in 11 units, first at record index 935 (`35C42F21`) as image offset 6,481,468 of 6,498,009 - inside a float-bearing region,
+not a name-bearing type-7 row. That unit carries 200 in-unit type-6 sections (§7's framing) while its clean `VO\Lara\B_LARA_GRT_lift_*`
+keys all resolve as standalone banks, so voice lines split between both placements; which of the 295 orphan keys pair with which local
+stream is unproven and stays open.
+
+Reproduce: `./build/oa-asset "$G" namescan --out /tmp/names.txt` (stdout = one record row per resolved key, stderr ends with the
+summary line above), and the bank heads via `./build/oa-asset "$G" extract --hash 8F2641D7 --mask FFFFFFFF --out /tmp/bank.bin`.
+`scripts/ci.sh` asserts a three-digit `matched=` count whenever an install is present.
