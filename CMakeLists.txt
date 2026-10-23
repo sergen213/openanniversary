@@ -39,7 +39,7 @@ foreach(source IN ITEMS shaders/quad.vert shaders/quad.frag shaders/mesh.vert sh
       DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${source}"
       COMMENT "SPIR-V ${shaderName}")
   else()
-    add_file_copy("${CMAKE_CURRENT_SOURCE_DIR}/shaders/spirv/${shaderName}.spv" "${shaderOutput}" OUTPUT_DIR "${CMAKE_BINARY_DIR}/shaders")
+    file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/shaders/spirv/${shaderName}.spv" DESTINATION "${CMAKE_BINARY_DIR}/shaders")
   endif()
   list(APPEND OA_SHADER_OUTPUTS "${shaderOutput}")
 endforeach()
