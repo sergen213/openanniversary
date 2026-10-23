@@ -111,3 +111,11 @@ blocks × 64, and 0x800 + 244×36 + 640 = 11,472 = the record's byte size. So th
 50-60% of the step-byte rule. The 640 bytes are not spread evenly between the blocks [V-data]; a per-block side entry
 would be 2.62 bytes, which is not an integer. The framing question stays open, now with the block count pinned
 rather than guessed.
+
+The name hunt extended to 13,429 candidates (area codes, object names, numeric and zero-padded names, and the 429
+identifier-shaped strings extracted from `cn3`'s two type-10 script sections, each against `pc-w\sndstrm\*.mul`/`.raw`):
+all hash to zero records. [V-data] the chain is read though: `FUN_00418720` installs `DAT_00754678` = the startup-built
+`<prefix>\sndstrm\`, `FUN_004198d0` opens `%s%s.mul` with that prefix plus a name it does not build itself — a caller
+hands it the string, and the interpreter handler `FUN_0042e8b0` copies the name out of a runtime string buffer
+(`DAT_007c8870`) that the level scripts fill, then logs `Unable to create soundstream: %s` on failure. So the name IS
+a plaintext string in level script data — just not in `cn3`'s two sections.
