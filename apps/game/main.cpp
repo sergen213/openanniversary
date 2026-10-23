@@ -247,7 +247,14 @@ int main(int argc, char** argv) {
     bool followBody = false;
     float followAt[3] = {0.0f, 0.0f, 0.0f};
 
-    const std::string meshPath = config.str("mesh");
+    // --level=<code> selects one of the game's own level codes from the chapter table inside
+    // pc-w\generalbank.drm (docs/formats/CONTAINERS.md §6.1): the code is the unit's name,
+    // pc-w\<code>.drm, so an alias for --mesh through the game's own naming. Start positions are not read
+    // from that table; where the body spawns and how the camera frames stay this file's behaviour.
+    std::string meshPath = config.str("mesh");
+    if (meshPath.empty() && !config.str("level").empty()) {
+        meshPath = "pc-w\\" + config.str("level") + ".drm";
+    }
     if (!meshPath.empty()) {
         oa::cdc::BigfileSet archive;
         if (!archive.open(config.str("gameDir"), &error)) {
