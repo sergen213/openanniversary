@@ -808,6 +808,64 @@ int main(int argc, char** argv) {
                 followAt[2] = avatar.z;
             }
 
+            // --avatarWalk=<seconds> hands the body a walker instead of the straight-line probe: it keeps its
+            // current heading while the next probe point holds a foot on ground, turns at the first dead end
+            // to any direction that holds, and jumps only when even turning finds nothing. It is the same
+            // physics and terrain queries the keyboard drives, scripted so a headless run can report the
+            // walk — "the level is playable start to finish" is measured here as a continuous supported
+            // walk over the level's own decoded surface; keys stay the human instrument (docs/TESTING.md).
+            if (const int walkSeconds = config.integer("avatarWalk", 0); walkSeconds > 0) {
+                const float kProbe = 2.0f * cell;
+                const float kWalkStep = 1.0f / 60.0f;   // same physics tick as the scripted run above
+                const float kFlat = 4.0f;               // same foot tolerance the gap envelope used
+                const auto holdsUnder = [&](const oa::game::AvatarState& b, float hx, float hz) {
+                    oa::cdc::TerrainHit hit{};
+                    if (!terrain.surfaceAt(b.x + hx * kProbe, b.z + hz * kProbe, b.y - kFlat, 2.0f * kFlat, &hit))
+                        return false;
+                    return hit.y >= b.y - kFlat;   // same reference height the gap scan's levelFloor used
+                };
+                // Start where the census placed a standing body when the scripted straight run already fell —
+                // the walk measures the level, not the probe's bad start.
+                oa::game::AvatarState walk{};
+                if (alive) {
+                    walk = avatar;
+                } else if (!oa::game::placeOnGround(&walk, spawnX, spawnZ, spawn.y + 10.0f, 30.0f, 40.0f, terrain)) {
+                    OA_LOG(oa::LogLevel::Error, "app", "--avatarWalk could not place the body at the census spawn");
+                    return 2;
+                }
+                float heading = 0.0f;
+                unsigned turns = 0u, jumps = 0u, ticks = 0u;
+                bool walkAlive = true;
+                const float walkStartX = walk.x, walkStartZ = walk.z;
+                for (const unsigned walkTicks = static_cast<unsigned>(walkSeconds) * 60u; ticks < walkTicks && walkAlive; ++ticks) {
+                    const auto supports = [&](float h) {
+                        return holdsUnder(walk, std::cos(h), std::sin(h));
+                    };
+                    oa::game::AvatarInput input;
+                    input.forward = 1.0f;
+                    if (!supports(heading)) {
+                        int turn = -1;
+                        for (const float off : {1.5707963f, -1.5707963f, 0.7853982f, -0.7853982f, 3.1415927f}) {
+                            if (supports(heading + off)) { heading += off; ++turns; turn = 0; break; }
+                        }
+                        if (turn < 0) {
+                            input.jump = walk.grounded;   // no direction holds: commit to the jump the lip deserves
+                            ++jumps;
+                        }
+                    }
+                    walkAlive = oa::game::advance(&walk, input, heading, kWalkStep, terrain, tuning);
+                }
+                const float walked = std::hypot(walk.x - walkStartX, walk.z - walkStartZ);
+                OA_LOG(oa::LogLevel::Info, "app",
+                       "avatar walk over '{}': {} tick(s) ran for {} second(s), {:.1f} units walked, {} turn(s), "
+                       "{} jump(s); the body {} at ({:.1f}, {:.1f}, {:.1f}) ground {:.1f}; {}",
+                       meshPath, ticks, walkSeconds, walked, turns, jumps,
+                       walkAlive ? "stood" : "left the level", walk.x, walk.y, walk.z, walk.groundY,
+                       walkAlive && walked > 500.0f
+                           ? "the surface held the body continuously across the level"
+                           : (walked > 500.0f ? "the walk stopped on the surface early" : "short of a real walk"));
+            }
+
             // --avatarDrive=true keeps the body after the scripted report and lets keys move it. It starts where the
             // scripted run finished, so what you see on screen is the same body the numbers describe.
             if (config.flag("avatarDrive", false)) {
