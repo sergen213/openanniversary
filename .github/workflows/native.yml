@@ -34,5 +34,6 @@ jobs:
           cmake --build "$RUNNER_TEMP/SDL-build"
           cmake --install "$RUNNER_TEMP/SDL-build"
 
+      # Point CMake at the pinned SDL3 install dir so find_package(SDL3 CONFIG) locates SDL3Config.cmake.
       - name: Unit tests, renderer smoke, sanitizer suite
-        run: LD_LIBRARY_PATH="$HOME/sdl3/lib" scripts/ci.sh
+        run: CMAKE_PREFIX_PATH="$HOME/sdl3" LD_LIBRARY_PATH="$HOME/sdl3/lib" scripts/ci.sh
