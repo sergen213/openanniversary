@@ -1093,14 +1093,14 @@ int main(int argc, char** argv) {
         };
         const unsigned pcmBytes = static_cast<unsigned>(count * 2u);
         std::fwrite("RIFF", 1u, 4u, f);
-        put32(8u + pcmBytes);
+        put32(36u + pcmBytes);   // body after "RIFF"+size: WAVE tag (4) + fmt chunk id/size/body (24) + data header (8) = 36
         std::fwrite("WAVEfmt ", 1u, 8u, f);
-        put32(16u);   // the fmt chunk body: exactly sixteen bytes below
+        put32(16u);   // the fmt chunk body is exactly sixteen bytes below
         put16(1u);    // uncompressed integer samples
         put16(1u);    // mono: the engine's blocks emit one sample stream
         put32(rate);
         put32(rate * 2u);
-        put16(1u);    // block align matches the single channel
+        put16(2u);    // block align = channels * sample width = one sixteen-bit frame
         put16(16u);   // bits per sample
         std::fwrite("data", 1u, 4u, f);
         put32(pcmBytes);

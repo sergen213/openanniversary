@@ -126,9 +126,12 @@ a plaintext string in level script data — just not in `cn3`'s two sections.
 Measured directly on `pc-w\lara.drm` (record hash `5FF91900`, section directory index 24 = payload size 32,736; extracted
 through the hex-parsing quirk of GEOMETRY.md §19 by asking for section `18`): the payload is `{u32 rate, i32 loopStart,
 u32 loopEnd}` with (size - 12) % 36 == 0 and no leftover — 909 blocks — and every one of those blocks passes §3's structural
-test (step byte at +2 <= 88, the engine's ladder clamp, AND reserved byte at +3 == 0). The same rule closes on all 229 type-6
-sections of that unit, and for its four looping sounds `loopEnd` equals blocks * 64 samples exactly. Inside a unit, then:
-sound = twelve-byte header straight into §3's 36-byte blocks **[V-data]**.
+test (step byte at +2 <= 88, the engine's ladder clamp, AND reserved byte at +3 == 0). Re-measured across the whole directory
+afterwards: every one of lara.drm's 229 type-6 sections closes on that rule with block sanity passing on each of their blocks
+(229/229 sizes congruent to 12 mod 36, zero insane blocks), and exactly four of them put `loopEnd` at blocks * 64 samples —
+the looping sounds. Inside a unit: sound = twelve-byte header straight into §3's blocks **[V-data]**, gated in code by
+`oa::cdc::frameAdpcmStream()` (`src/cdc/Sound.hpp/.cpp`) and played end to end by `--shippedSound='pc-w\lara.drm'` (909 blocks
+= 58,176 samples at 44,100 Hz into the platform device; `scripts/ci.sh` asserts that line whenever an install is present).
 
 The standalone archive records of family 1 (§1) are NOT that shape and their framing stays open **[V-data negative]**: `001AA4B3`
 (size 11,472) leaves a 12-byte remainder after 318 blocks at +12; the only starts where (size - H) is a whole number of

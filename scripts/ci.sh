@@ -64,9 +64,7 @@ if [[ -n "${OA_GAME_DIR:-}" ]]; then
     fi
     # The shipped-stream clause proves the §7 in-unit framing end to end on real bytes: oa-game must report a framed
     # type-6 section (AUDIO.md §7); silence means either the unit moved or the gate broke.
-    if grep -q 'shipped sound:' "$log"; then
-        grep -m1 'shipped sound:' "$log" | sed -n 's/^.*\[/[/'
-    else
+    if ! grep -m1 'shipped sound:' "$log"; then
         echo "FAIL: no shipped type-6 section framed in lara.drm (AUDIO.md §7 regression)" >&2
         exit 1
     fi
