@@ -24,16 +24,23 @@ find_package(SDL3 REQUIRED CONFIG)
 find_package(Vulkan REQUIRED)
 
 # Shaders compile to SPIR-V at build time and load from <executable dir>/shaders at run time, so the repository
-# stores GLSL rather than a binary blob and every shader shows up in the build log.
-find_program(OA_GLSLANG glslangValidator REQUIRED)
+# stores GLSL rather than a binary blob and every shader shows up in the build log. When glslangValidator is not
+# installed (CI's ubuntu-24.04 mirror has no glslang package, and a third party shouldn't need the Vulkan SDK just
+# to build), the prebuilt SPIR-V checked into shaders/spirv/ is copied in instead; regenerate with
+# `for s in shaders/*.vert shaders/*.frag; do glslangValidator -V "$s" -o shaders/spirv/$s.spv; done` when editing a shader.
+find_program(OA_GLSLANG glslangValidator)
 set(OA_SHADER_OUTPUTS "")
 foreach(source IN ITEMS shaders/quad.vert shaders/quad.frag shaders/mesh.vert shaders/mesh.frag)
   get_filename_component(shaderName "${source}" NAME)
   set(shaderOutput "${CMAKE_BINARY_DIR}/shaders/${shaderName}.spv")
-  add_custom_command(OUTPUT "${shaderOutput}"
-    COMMAND ${OA_GLSLANG} -V "${CMAKE_CURRENT_SOURCE_DIR}/${source}" -o "${shaderOutput}"
-    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${source}"
-    COMMENT "SPIR-V ${shaderName}")
+  if(OA_GLSLANG)
+    add_custom_command(OUTPUT "${shaderOutput}"
+      COMMAND ${OA_GLSLANG} -V "${CMAKE_CURRENT_SOURCE_DIR}/${source}" -o "${shaderOutput}"
+      DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${source}"
+      COMMENT "SPIR-V ${shaderName}")
+  else()
+    add_file_copy("${CMAKE_CURRENT_SOURCE_DIR}/shaders/spirv/${shaderName}.spv" "${shaderOutput}" OUTPUT_DIR "${CMAKE_BINARY_DIR}/shaders")
+  endif()
   list(APPEND OA_SHADER_OUTPUTS "${shaderOutput}")
 endforeach()
 add_custom_target(oa_shaders ALL DEPENDS ${OA_SHADER_OUTPUTS})
