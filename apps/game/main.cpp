@@ -367,13 +367,10 @@ int main(int argc, char** argv) {
             // same-shaped base tables - the payloads' own kind-0 relocations name it (8baf540e: 77->141 x160, 86->160 x76,
             // 131->206, 140->153, 165->191, 190->188), and those picks tile the array: coverage of referenced vertices rises
             // 0.305 -> 0.983 there while §21's unit-wide census (every tree on table 141) leaves ranges overlapping. Trees
-            // whose payloads name no candidate fall back to the first covering census run, which never loses coverage install-
-            // wide (mean referenced fraction 0.666 -> 0.732 over all 50 oct-tree units). decodeTerrainUnit walks trees,
-            // chains and bases once so this caller cannot drift a second copy of the walk; capacity/coverage failures land in
-            // TerrainStripChain's counters instead of drawing junk (§19's edge gate keeps coarse triangles off the grid too).
+            // whose tables the terrain GROUP records name instead (§29 [V-exe]: a stride-0xB0 group array whose kind-0 sites at +0x44 name an oct-tree section and +0x90 its material table; §26's hybrid stays as the fallback rule for units with no group array). Measured on `8baf540e` under `groupRecord`: the nine trees' index ranges tile 0..149,076 with zero bad heads (§30), so tables the §20 detector never accepted - sections 218/209/215 - decode from their own record slots here; texture binding still only resolves class-32 pages through the §20-detected lists, so those three trees keep white-bound materials until question (b)'s second namespace is pinned. decodeTerrainUnit walks trees, chains and bases once so this caller cannot drift a second copy of the walk; capacity/coverage failures land in TerrainStripChain's counters instead of drawing junk (§19's edge gate keeps coarse triangles off the grid too).
             std::vector<oa::cdc::TerrainTreeWalk> walks;
             std::string walkError;   // names the refusing rule when the unit has no oct-tree at all (§15)
-            if (!oa::cdc::decodeTerrainUnit(drm, 0u, oa::cdc::TerrainTableRule::relocOrFirstCovering, &walks, &walkError)) {
+            if (!oa::cdc::decodeTerrainUnit(drm, 0u, oa::cdc::TerrainTableRule::groupRecord, &walks, &walkError)) {
                 OA_LOG(oa::LogLevel::Warn, "app", "'{}' strips skipped: {}", meshPath, walkError);
             }
             // §23's texture binding needs each chosen table's class/value words; fetch the same §20 detector the selection

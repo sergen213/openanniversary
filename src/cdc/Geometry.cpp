@@ -384,6 +384,27 @@ bool decodeTerrainGroupLinks(const DrmFile& drm, std::vector<TerrainGroupLink>* 
     if (error != nullptr) error->clear();
     return true;
 }
+// The bases inside one group table named by §29's link above: the runtime list pointer lands on a u32 count header, and each material record is 20 bytes read from FOUR past that header (§29's pseudocode: rec = *(group + 0x90) + 4 + matIdx * 0x14), with the vertex base in its slot at rec + 8 - measured on section 141@336 where those words run 0, ..., 32,020 across group 0's 92 materials exactly as §29's per-material column reads [V-data]. The values are already vertex counts; a non-monotone run refuses rather than inventing bases.
+static std::vector<std::uint32_t> readGroupTableBases(const DrmFile& drm, std::size_t section, std::size_t offset) {
+    const auto bytes = drm.payload(drm.sections()[section]);
+    if (offset + 4u > bytes.size()) return {};   // the count header itself must fit
+    const auto numMaterials = static_cast<std::uint64_t>(bytes[offset]) |
+                              (static_cast<std::uint64_t>(bytes[offset + 1u]) << 8u) |
+                              (static_cast<std::uint64_t>(bytes[offset + 2u]) << 16u) |
+                              (static_cast<std::uint64_t>(bytes[offset + 3u]) << 24u);
+    if (numMaterials == 0u || offset + 4u + 20u * numMaterials > bytes.size()) return {};   // whole stride-20 records must fit
+    std::vector<std::uint32_t> bases(static_cast<std::size_t>(numMaterials));
+    for (std::size_t i = 0; i < bases.size(); ++i) {
+        const auto at = offset + 4u + 20u * i + 8u;   // §29's base slot inside each material record
+        const auto value = static_cast<std::uint32_t>(bytes[at]) |
+                           (static_cast<std::uint32_t>(bytes[at + 1u]) << 8u) |
+                           (static_cast<std::uint32_t>(bytes[at + 2u]) << 16u) |
+                           (static_cast<std::uint32_t>(bytes[at + 3u]) << 24u);
+        if (i != 0u && value < bases[i - 1u]) return {};   // §29's per-material column never decreases
+        bases[i] = value;
+    }
+    return bases;
+}
 
 
 bool decodeTerrainUnit(const DrmFile& drm, std::uint32_t vertexArraySection, TerrainTableRule tableRule,
@@ -464,8 +485,11 @@ bool decodeTerrainUnit(const DrmFile& drm, std::uint32_t vertexArraySection, Ter
 
         TerrainTreeWalk walk;
         walk.nodeSection = i;
-        // §29 [V-exe]: when asked by rule, this tree's table is whatever its terrain GROUP record points at - the shipped pairing, not a census guess. The group array names sections directly; the BASES still come from that section's §20-detected run because §29's own material records store byte offsets we have not pinned down yet [INFERENCE].
+        // §29 [V-exe]: when asked by rule, this tree's table is whatever its terrain GROUP record points at - the shipped pairing, not a census guess. The group array names sections directly and the bases come from that section's own material-record slots (§29 layout above); when that framing refuses, the linked section's §20-detected run is still tried before giving up.
         const auto link = groupTableForTree.find(static_cast<std::uint32_t>(i));   // tree section -> (table section, table offset) from §29
+        std::vector<std::uint32_t> groupBases;                                     // bases straight off the linked list when it decodes
+        if (tableRule == TerrainTableRule::groupRecord && link != groupTableForTree.end())
+            groupBases = readGroupTableBases(drm, link->second.first, link->second.second);
         const auto maxMat = censusMaxMaterial(headsPerPayload);   // base-free census of this tree's own matIdx range (§10)
         std::size_t fallbackChoice = candidates.size();
         for (std::size_t k = 0; k < candidates.size(); ++k) {
@@ -480,8 +504,9 @@ bool decodeTerrainUnit(const DrmFile& drm, std::uint32_t vertexArraySection, Ter
             }
         }
         std::size_t namedChoice = candidates.size();
-        std::uint32_t bestCount = 0u;
-        if (tableRule == TerrainTableRule::relocNamed || tableRule == TerrainTableRule::relocOrFirstCovering) {
+        std::uint32_t bestCount = 0u;                                              // §26's most-referenced table for this tree
+        if (tableRule == TerrainTableRule::relocNamed || tableRule == TerrainTableRule::relocOrFirstCovering ||
+            tableRule == TerrainTableRule::groupRecord) {   // counts feed the fallback even under the shipped rule
             for (std::size_t k = 0; k < candidates.size(); ++k) {   // §26: the payloads' kind-0 relocations name a table
                 std::uint32_t count = 0u;
                 for (const auto& entry : headsPerPayload) {
@@ -501,15 +526,18 @@ bool decodeTerrainUnit(const DrmFile& drm, std::uint32_t vertexArraySection, Ter
         const auto choice = tableRule == TerrainTableRule::firstCovering      ? fallbackChoice
                             : tableRule == TerrainTableRule::shortestCovering ? shortestChoice
                             : tableRule == TerrainTableRule::relocNamed       ? namedChoice
-                            : tableRule == TerrainTableRule::groupRecord      ? linkedChoice
-                                                                              : (bestCount > 0u ? namedChoice : fallbackChoice);
+                            : tableRule == TerrainTableRule::groupRecord      ? (linkedChoice != candidates.size()   // §29's pairing first, hybrid underneath
+                                                                                 ? linkedChoice : (bestCount > 0u ? namedChoice : fallbackChoice))
+                            : (bestCount > 0u ? namedChoice : fallbackChoice);
         walk.tableReferences = bestCount;
         if (choice != candidates.size()) walk.tableSection = candidates[choice].section;
+        if (tableRule == TerrainTableRule::groupRecord && !groupBases.empty()) walk.tableSection = link->second.first;   // bases came from the linked section, so its name must survive even when no detected run exists
         for (auto& entry : headsPerPayload) {
             TerrainStripChain chain;
             walkPayload(entry.first, entry.second,
-                        choice != candidates.size() ? std::span<const std::uint32_t>(candidates[choice].list.vertexBase)
-                                                    : std::span<const std::uint32_t>{},
+                        !groupBases.empty() ? std::span<const std::uint32_t>(groupBases)
+                                            : choice != candidates.size() ? std::span<const std::uint32_t>(candidates[choice].list.vertexBase)
+                                                                          : std::span<const std::uint32_t>{},
                         chain);
             walk.byPayload.emplace_back(entry.first, std::move(chain));
         }

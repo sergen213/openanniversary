@@ -36,6 +36,10 @@ bool Window::create(const WindowConfig& config, std::string* error) {
 }
 
 void Window::destroy() {
+    if (gamepad_ != 0) {
+        if (SDL_Gamepad* pad = SDL_GetGamepadFromID(static_cast<SDL_JoystickID>(gamepad_))) SDL_CloseGamepad(pad);
+        gamepad_ = 0;
+    }
     if (window_ != nullptr) {
         SDL_DestroyWindow(window_);
         window_ = nullptr;
@@ -86,6 +90,9 @@ bool Window::keyDown(Key key) const {
 }
 
 bool Window::enableGamepad(std::string* error) {
+    // The video-only init above never brings up the pad subsystem, so SDL_GetGamepads would answer 0 with a
+    // live pad on the desk; ask for it only here, which keeps --gamepad=false on the untouched baseline path.
+    SDL_InitSubSystem(SDL_INIT_GAMEPAD);
     int count = 0;
     SDL_JoystickID* pads = SDL_GetGamepads(&count);
     if (pads == nullptr || count == 0) {
@@ -94,7 +101,8 @@ bool Window::enableGamepad(std::string* error) {
     }
     gamepad_ = static_cast<int>(pads[0]);
     SDL_free(pads);
-    SDL_Gamepad* pad = SDL_GetGamepadFromID(static_cast<SDL_JoystickID>(gamepad_));
+    // FromID only answers for a pad that was opened; open is what hands back the live handle.
+    SDL_Gamepad* pad = SDL_OpenGamepad(static_cast<SDL_JoystickID>(gamepad_));
     OA_LOG(LogLevel::Info, "platform", "gamepad '{}' vendor {} adopted: left stick and d-pad are the named keys (and the WASD aliases), "
                                        "South jumps, East runs, shoulder buttons dolly",
            (pad != nullptr ? SDL_GetGamepadName(pad) : "(detached)"),
@@ -104,7 +112,7 @@ bool Window::enableGamepad(std::string* error) {
 
 bool Window::gamepadDown(Key key) const {
     if (gamepad_ == 0) return false;
-    SDL_Gamepad* pad = SDL_GetGamepadFromID(static_cast<SDL_JoystickID>(gamepad_));
+    SDL_Gamepad* pad = SDL_GetGamepadFromID(static_cast<SDL_JoystickID>(gamepad_));  // live once enableGamepad opened it
     if (pad == nullptr) return false;
     // Half-scale dead zone on the stick; the d-pad buttons answer the same keys.
     const auto stickLeft = [&]() {
