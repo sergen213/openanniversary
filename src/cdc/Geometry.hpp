@@ -160,7 +160,7 @@ bool findTerrainMaterialBases(const DrmFile& drm, std::uint32_t vertexArraySecti
 // unit 8baf540e every tree's strip payloads kind-0-relocate exactly ONE of the unit's §20-shaped candidate tables, and
 // that table differs per tree - 77->141 x160, 86->160, 131->206, 140->153, 165->191, 190->188 - while §21's unit-wide
 // census picked 141 for all nine trees; three small trees name no candidate table at all).
-enum class TerrainTableRule { firstCovering = 0, shortestCovering = 1, relocNamed = 2, relocOrFirstCovering = 3 };
+enum class TerrainTableRule { firstCovering = 0, shortestCovering = 1, relocNamed = 2, relocOrFirstCovering = 3, groupRecord = 4 };
 
 // One oct-tree of a level unit decoded the way §15/§20 walk it, plus the base table its OWN material census picked.
 // §21 picks ONE table for the whole unit; this split asks whether the coarse remainder (§20 open item 3) is explained by
@@ -178,13 +178,20 @@ struct TerrainTreeWalk {
 
 // Decodes every oct-tree in the unit. `vertexArraySection` is where the stride-20 vertex array lives (section 0 for
 // level units, §2). For each tree: walk its leaf groups once base-free to census header +20 matIdx values (§10), then
-// pick a candidate table — the first decoded run covering the census when `preferShortestTable` is false (the rule
-// §21 measured), or the shortest covering run when true — and re-walk with that table's bases applied. Candidate
-// tables are collected once per unit from every section whose own-section kind-0 slots pass §20's detector, so a
+// pick a candidate table — first covering run when `tableRule` is `firstCovering` (§21's rule), shortest covering when
+// `shortestCovering`, the candidate the tree's own payloads' kind-0 relocations name most often when `relocNamed`
+// (§26 measured every 8baf540e tree naming exactly one: 77->141 x160, 86->160 x76, 131->206, 140->153, 165->191,
+// 190->188), that pick with the first covering run as fallback when `relocOrFirstCovering` (§27's wired rule), or the
+// table its terrain GROUP record points at when `groupRecord` (GEOMETRY.md §29 [V-exe]: tra.exe reads *(group + 0x90)
+// as the material list and takes the tree from group + 0x44, so the pairing is recorded data rather than a census guess).
+// Candidate tables are collected once per unit from every section whose own-section kind-0 slots pass §20's detector, so a
 // wrong pick cannot invent geometry: capacity failures still land in badHeads/unknownMaterials. Fails only when the
 // unit holds no oct-tree at all or `vertexArraySection` is out of range; trees that decode to nothing keep their entry
 // with empty byPayload so callers can report per tree honestly.
 bool decodeTerrainUnit(const DrmFile& drm, std::uint32_t vertexArraySection, TerrainTableRule tableRule,
                        std::vector<TerrainTreeWalk>* out, std::string* error = nullptr);
 
+// A terrain group record pairs one oct-tree with the material table that tree draws with. GEOMETRY.md §29 [V-exe]: tra.exe's DrawTerrainGroup keeps the material list at *(group + 0x90) - a section PLUS the reloc addend, so the list starts partway through that section - and hands each 20-byte record's +8 slot to DrawIndexedPrimitive as the vertex base; the group array is a stride-0xB0 run whose kind-0 relocations name tree section at record + 0x44 and table section at + 0x90.
+struct TerrainGroupLink { std::uint32_t treeSection = 0; std::uint32_t tableSection = 0; std::uint32_t tableOffset = 0; };
+bool decodeTerrainGroupLinks(const DrmFile& drm, std::vector<TerrainGroupLink>* out, std::string* error = nullptr);
 }  // namespace oa::cdc

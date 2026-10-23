@@ -2,6 +2,7 @@
 // mirror measurements taken from shipped units: a texture section with two relocations, a general
 // section with one, and the size-0 type-32 tail entry whose packed field must not be read as a
 // relocation count (generalbank.drm over-consumes by 56 bytes when it is).
+#include "cdc/Geometry.hpp"
 
 #include "cdc/Drm.hpp"
 
@@ -230,4 +231,41 @@ TEST(DrmFile, resolvesUnitWithTrailingEntryWhoseBytesAreAbsent) {
     EXPECT_EQ(static_cast<unsigned char>(drm.payload(drm.sections()[1])[0]), 'g');
 }
 
+TEST(TerrainGroupLinks, pairsTreeAndTableSlotsInsideAGroupRecord) {
+    // §29 [V-exe]: a terrain group record is a stride-0xB0 run whose kind-0 relocations at record + 0x44 name the
+    // oct-tree section and + 0x90 name that tree's material table, so the pairing needs no census at all.
+    const std::vector<FixtureSection> sections{
+        FixtureSection{20u, 0u, 0u, {}, std::string(20u, 'v')},   // section 0: a vertex record
+        FixtureSection{0xB0u, 10u, (2u << 8u),
+                       {{(0u | (3u << 3u)), 0x44u}, {(0u | (4u << 3u)), 0x90u}},   // kind-0 sites inside the record: the engine counts sections from one
+                       std::string(0xB0u, 'g')},                  // section 1: the group array
+        FixtureSection{16u, 0u, 0u, {}, std::string(16u, 't')},   // section 2: a tree payload
+        FixtureSection{40u, 0u, 0u, {}, std::string(40u, 'm')},   // section 3: its material table
+    };
+    const auto image = buildImage(14, 8, 20, sections);
+    DrmFile drm;
+    std::string error;
+    ASSERT_TRUE(DrmFile::parse(image, &drm, &error)) << error;
+    std::vector<oa::cdc::TerrainGroupLink> links;
+    EXPECT_TRUE(oa::cdc::decodeTerrainGroupLinks(drm, &links, &error));
+    ASSERT_EQ(links.size(), 1u);
+    EXPECT_EQ(links[0].treeSection, 2u);
+    EXPECT_EQ(links[0].tableSection, 3u);
+}
+TEST(TerrainGroupLinks, refusesPayloadsThatNameNoTreeTablePair) {
+    const std::vector<FixtureSection> sections{
+        FixtureSection{20u, 0u, 0u, {}, std::string(20u, 'v')},
+        FixtureSection{0xB0u, 10u, (1u << 8u), {{(0u | (2u << 3u)), 0x44u}},   // a tree pointer with no table beside it
+                       std::string(0xB0u, 'g')},
+        FixtureSection{16u, 0u, 0u, {}, std::string(16u, 't')},
+    };
+    const auto image = buildImage(14, 8, 20, sections);
+    DrmFile drm;
+    std::string error;
+    ASSERT_TRUE(DrmFile::parse(image, &drm, &error)) << error;
+    std::vector<oa::cdc::TerrainGroupLink> links;
+    EXPECT_FALSE(oa::cdc::decodeTerrainGroupLinks(drm, &links, &error));
+    EXPECT_EQ(links.size(), 0u);
+    EXPECT_NE(error.find("pairing"), std::string::npos);
+}
 }  // namespace

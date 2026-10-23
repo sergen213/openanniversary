@@ -590,11 +590,11 @@ int main(int argc, char** argv) {
             return std::sqrt(squared);
         };
         using Rule = oa::cdc::TerrainTableRule;
-        for (const auto rule : {Rule::firstCovering, Rule::shortestCovering, Rule::relocNamed, Rule::relocOrFirstCovering}) {
+        for (const auto rule : {Rule::firstCovering, Rule::shortestCovering, Rule::relocNamed, Rule::relocOrFirstCovering, Rule::groupRecord}) {
             std::vector<oa::cdc::TerrainTreeWalk> trees;
             std::string why;
             if (!oa::cdc::decodeTerrainUnit(drm, 0u, rule, &trees, &why)) return fail(why);
-            std::printf("%s\n", rule == Rule::firstCovering ? "first-covering rule (§21):" : rule == Rule::shortestCovering ? "shortest-covering rule:" : rule == Rule::relocNamed ? "reloc-named rule (§26):" : "reloc-or-first-covering hybrid:");
+            std::printf("%s\n", rule == Rule::firstCovering ? "first-covering rule (§21):" : rule == Rule::shortestCovering ? "shortest-covering rule:" : rule == Rule::relocNamed ? "reloc-named rule (§26):" : rule == Rule::relocOrFirstCovering ? "reloc-or-first-covering hybrid:" : "group-record pairing (§29):");
             for (const auto& walk : trees) {
                 std::vector<std::uint32_t> tris;
                 std::uint32_t records = 0, heads = 0, badHeads = 0, broken = 0, unknown = 0;
