@@ -759,7 +759,9 @@ int main(int argc, char** argv) {
                 for (int attempt = 0; attempt < attemptCount; ++attempt) {
                     const Candidate& pick = best[attempt];
                     const Direction dir = kDirs[pick.dir];
-                    const float yawToFace = std::atan2f(dir.x, dir.z);   // src/game/Avatar.cpp: forward = (sin yaw, cos yaw)
+                    // libstdc++ on ubuntu-24.04 (GCC 13.3) does not export std::atan2f; std::atan2 on two floats
+                    // returns double, so cast once. Math is unchanged; the same file builds on GCC 16/Clang 23 hosts.
+                    const float yawToFace = static_cast<float>(std::atan2(dir.x, dir.z));   // Avatar.cpp: forward = (sin yaw, cos yaw)
                     oa::game::AvatarState trav;
                     if (!oa::game::placeOnGround(&trav, pick.x, pick.z, pick.ground + 10.0f, 30.0f, 40.0f, terrain)) {
                         OA_LOG(oa::LogLevel::Warn, "app", "--avatarTraversal could not place the body at ({:.1f}, {:.1f})",
