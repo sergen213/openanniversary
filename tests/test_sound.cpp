@@ -48,3 +48,44 @@ TEST(Sound, ignoresTrailingPartialBlock) {
   EXPECT_EQ(out[0], 0x11);
   EXPECT_EQ(out[64], 7);  // the partial tail is untouched
 }
+TEST(Sound, framesTypeSixStreamsAsHeaderPlusWholeBlocks) {
+  // AUDIO.md §7 [V-data]: twelve-byte {u32 rate, i32 loopStartSamples, u32 loopEndSamples} then whole 36-byte blocks.
+  const auto putU32 = [](std::vector<std::uint8_t>& out, unsigned v) {
+      for (unsigned b = 0u; b < 4u; ++b) out.push_back(static_cast<std::uint8_t>((v >> (b * 8u)) & 0xFFu));
+  };
+  std::vector<std::uint8_t> payload;
+  putU32(payload, 44100u);
+  putU32(payload, 0xFFFFFFFFu);   // loopStart -1: a non-looping stream
+  putU32(payload, 128u);          // two blocks * 64 samples
+  for (unsigned i = 0u; i < 2u; ++i) {
+      const auto block = makeAdpcmBlock(1000, 5, 0x31, 0x9F);
+      payload.insert(payload.end(), block.begin(), block.end());
+  }
+  oa::cdc::AdpcmStream stream;
+  ASSERT_TRUE(oa::cdc::frameAdpcmStream(std::span<const std::byte>(reinterpret_cast<const std::byte*>(payload.data()), payload.size()), &stream));
+  EXPECT_EQ(stream.rate, 44100u);
+  EXPECT_EQ(stream.loopStartSamples, -1);
+  EXPECT_EQ(stream.loopEndSamples, 128u);
+  EXPECT_EQ(stream.blocks.size(), 72u);
+}
+
+TEST(Sound, rejectsPayloadsThatDoNotFrame) {
+  // The gate is also the family discriminator: remainder, a step byte past the ladder clamp (88), or a dirty
+  // reserved byte at +3 all fail (§7's negative half measures exactly these shapes on standalone records).
+  const auto buildWith = [](unsigned blocks, std::uint8_t step, std::uint8_t reserved) {
+      std::vector<std::uint8_t> payload(12u, 0u);
+      payload[0] = 44100u & 0xFFu;
+      payload[1] = (44100u >> 8) & 0xFFu;
+      for (unsigned i = 0u; i < blocks; ++i) {
+          auto blk = makeAdpcmBlock(1000, step, 0x31, 0x9F);
+          auto block = std::vector<std::uint8_t>(blk.begin(), blk.end());
+          block[3] = reserved;
+          payload.insert(payload.end(), block.begin(), block.end());
+      }
+      return payload;
+  };
+  oa::cdc::AdpcmStream stream;
+  { auto bad = buildWith(2u, 5u, 0u); bad.push_back(7u); EXPECT_FALSE(oa::cdc::frameAdpcmStream(std::span<const std::byte>(reinterpret_cast<const std::byte*>(bad.data()), bad.size()), &stream)); }
+  { auto bad = buildWith(2u, 89u, 0u); EXPECT_FALSE(oa::cdc::frameAdpcmStream(std::span<const std::byte>(reinterpret_cast<const std::byte*>(bad.data()), bad.size()), &stream)); }
+  { auto bad = buildWith(2u, 5u, 1u); EXPECT_FALSE(oa::cdc::frameAdpcmStream(std::span<const std::byte>(reinterpret_cast<const std::byte*>(bad.data()), bad.size()), &stream)); }
+}

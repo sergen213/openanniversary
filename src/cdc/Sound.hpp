@@ -36,6 +36,19 @@ namespace cdc {
 void decodeAdpcmBlocks(std::span<const std::byte> payload,
                        std::int16_t* outSamples) noexcept;
 
+// Frames one in-unit type-6 sound stream (docs/formats/AUDIO.md §7 [V-data, 2026-10-23]): a twelve-byte header of
+// {u32 rate, i32 loopStartSamples, u32 loopEndSamples} followed by WHOLE 36-byte blocks and nothing else. The gate is
+// also the discriminator against the standalone family-1 archive records (§7's negative half: those never close this way),
+// so a payload that leaves a remainder after twelve bytes or carries a block failing §3's structural test (step byte at
+// +2 inside the engine's ladder clamp of 88, reserved byte at +3 zero) reports false rather than decoding garbage.
+struct AdpcmStream {
+    std::uint32_t rate = 0;
+    std::int32_t loopStartSamples = -1;
+    std::uint32_t loopEndSamples = 0;
+    std::span<const std::byte> blocks{};
+};
+
+bool frameAdpcmStream(std::span<const std::byte> payload, AdpcmStream* out) noexcept;
 // Builds one 36-byte block's bytes so tests and the game share the exact fixture: seed little-endian at
 // [0..1], step index at [2], [4..5] open the first sample pair; the rest stays zero. Byte [3] is skipped
 // by the decoder — the reference quirk marked [S] above.

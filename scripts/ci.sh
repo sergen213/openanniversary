@@ -24,7 +24,7 @@ game_args=()
 # (gravity, ground contact with step-up, one jump) over that same gated geometry, so neither the query nor its harness can rot
 # silently - GEOMETRY.md §16-§19 says why those heights are reported rather than asserted. `--avatarTraversal=true` then asks
 # whether one take-off clears a hole that unit actually leaves (docs/TESTING.md §4).
-[[ -n "${OA_GAME_DIR:-}" ]] && game_args+=(--gameDir="$OA_GAME_DIR" --mesh="${OA_MESH_RECORD:-8baf540e}" --strips=true --avatar=true --avatarTraversal=true)
+[[ -n "${OA_GAME_DIR:-}" ]] && game_args+=(--gameDir="$OA_GAME_DIR" --mesh="${OA_MESH_RECORD:-8baf540e}" --strips=true --avatar=true --avatarTraversal=true --sound=true --shippedSound='pc-w\lara.drm')
 log="$scratch/smoke.log"; status=0
 if [[ -n "${WAYLAND_DISPLAY:-}" ]]; then
     "$scratch/plain/oa-game" --selfCheck=true --frames=3 "${game_args[@]}" >"$log" 2>&1 || status=$?
@@ -60,6 +60,14 @@ if [[ -n "${OA_GAME_DIR:-}" ]]; then
         echo "traversal: this unit's gated coverage holds nothing jumpable (stated, not guessed)"
     else
         echo "FAIL: traversal reported neither a crossing nor an empty candidate set" >&2
+        exit 1
+    fi
+    # The shipped-stream clause proves the §7 in-unit framing end to end on real bytes: oa-game must report a framed
+    # type-6 section (AUDIO.md §7); silence means either the unit moved or the gate broke.
+    if grep -q 'shipped sound:' "$log"; then
+        grep -m1 'shipped sound:' "$log" | sed -n 's/^.*\[/[/'
+    else
+        echo "FAIL: no shipped type-6 section framed in lara.drm (AUDIO.md §7 regression)" >&2
         exit 1
     fi
 fi

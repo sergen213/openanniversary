@@ -72,5 +72,29 @@ void decodeAdpcmBlocks(std::span<const std::byte> payload,
   }
 }
 
+static std::uint32_t le32(const std::byte* at) {
+  return (static_cast<std::uint32_t>(static_cast<std::uint8_t>(at[0]))) |
+         (static_cast<std::uint32_t>(static_cast<std::uint8_t>(at[1])) << 8u) |
+         (static_cast<std::uint32_t>(static_cast<std::uint8_t>(at[2])) << 16u) |
+         (static_cast<std::uint32_t>(static_cast<std::uint8_t>(at[3])) << 24u);
+}
+
+// [V-data] docs/formats/AUDIO.md §7: inside a DRM unit, type-6 sections are a twelve-byte {rate, loopStart, loopEnd}
+// header plus whole 36-byte blocks of the §3 format - every block's step byte at +2 sits inside the engine's ladder
+// clamp (<= 88) and its reserved byte at +3 is zero. The standalone family-1 records never pass this gate (§7's
+// negative half), which is why framing here doubles as the discriminator between the two sound families.
+bool frameAdpcmStream(std::span<const std::byte> payload, AdpcmStream* out) noexcept {
+  if (payload.size() < 12u || (payload.size() - 12u) % 36u != 0u) return false;
+  const std::size_t blocks = (payload.size() - 12u) / 36u;
+  const std::byte* body = payload.data() + 12u;
+  for (std::size_t b = 0u; b < blocks; ++b) {
+    if (static_cast<std::uint8_t>(body[b * 36u + 2u]) > 88u || static_cast<std::uint8_t>(body[b * 36u + 3u]) != 0u) return false;
+  }
+  out->rate = le32(payload.data());
+  out->loopStartSamples = static_cast<std::int32_t>(le32(payload.data() + 4u));
+  out->loopEndSamples = le32(payload.data() + 8u);
+  out->blocks = std::span<const std::byte>(body, blocks * 36u);
+  return true;
+}
 }  // namespace cdc
 }  // namespace oa

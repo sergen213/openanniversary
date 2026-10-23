@@ -1069,11 +1069,46 @@ int main(int argc, char** argv) {
             }
         }
     }
-    // --sound=true runs the engine's own decoder over the module's fixture blocks and hands the
-    // decoded tone to the platform's audio device; --wavOut=<path> additionally writes the same
-    // PCM as a WAV so it can be compared byte-for-byte outside the process. The record framing
-    // stays open (docs/formats/AUDIO.md §4-§6), so this proves the pipeline and the decoder —
-    // not record playback; the fixture's 44100 rate is our own choice, not the engine's.
+    // --sound=true runs the engine's own decoder over the module's fixture blocks and hands the decoded tone to the
+    // platform's audio device; --wavOut=<path> additionally writes the same PCM as a WAV so it can be compared byte-for-byte
+    // outside the process. The standalone archive records of family 1 keep an unresolved table (docs/formats/AUDIO.md §7's
+    // negative half), so the fixture proves pipeline and decoder; --shippedSound below plays real streams through the
+    // in-unit type-6 framing that §7 closes.
+    // One WAV writer serves the fixture tone and any shipped stream so both byte-check paths share code.
+    const auto writeWav = [&](const std::string& path, const std::int16_t* samples, std::size_t count,
+                              unsigned rate) -> bool {
+        FILE* f = std::fopen(path.c_str(), "wb");
+        if (!f) return false;
+        const auto put32 = [&](unsigned v) {
+            const unsigned char bytes[4] = {static_cast<unsigned char>(v & 0xFFu),
+                                            static_cast<unsigned char>((v >> 8) & 0xFFu),
+                                            static_cast<unsigned char>((v >> 16) & 0xFFu),
+                                            static_cast<unsigned char>(v >> 24)};
+            std::fwrite(bytes, 1u, 4u, f);
+        };
+        const auto put16 = [&](unsigned v) {
+            const unsigned char bytes[2] = {static_cast<unsigned char>(v & 0xFFu),
+                                            static_cast<unsigned char>((v >> 8) & 0xFFu)};
+            std::fwrite(bytes, 1u, 2u, f);
+        };
+        const unsigned pcmBytes = static_cast<unsigned>(count * 2u);
+        std::fwrite("RIFF", 1u, 4u, f);
+        put32(8u + pcmBytes);
+        std::fwrite("WAVEfmt ", 1u, 8u, f);
+        put32(16u);   // the fmt chunk body: exactly sixteen bytes below
+        put16(1u);    // uncompressed integer samples
+        put16(1u);    // mono: the engine's blocks emit one sample stream
+        put32(rate);
+        put32(rate * 2u);
+        put16(1u);    // block align matches the single channel
+        put16(16u);   // bits per sample
+        std::fwrite("data", 1u, 4u, f);
+        put32(pcmBytes);
+        std::fwrite(samples, 1u, pcmBytes, f);
+        std::fclose(f);
+        OA_LOG(oa::LogLevel::Info, "app", "wrote {} PCM bytes as WAV to '{}'", pcmBytes, path);
+        return true;
+    };
     if (config.flag("sound", false)) {
         constexpr unsigned fixtureRepeats = 200u;   // 0.29 s of the fixture at 44100 Hz: audible, and short
         std::vector<std::uint8_t> fixture(fixtureRepeats * 36u);
@@ -1089,30 +1124,7 @@ int main(int argc, char** argv) {
             return 2;
         }
         if (!config.str("wavOut").empty()) {
-            if (FILE* f = std::fopen(config.str("wavOut").c_str(), "wb")) {
-                const auto put = [&](unsigned v) {   // little-endian header, like the samples it wraps
-                    const unsigned char bytes[4] = {
-                        static_cast<unsigned char>(v & 0xFFu), static_cast<unsigned char>((v >> 8) & 0xFFu),
-                        static_cast<unsigned char>((v >> 16) & 0xFFu), static_cast<unsigned char>(v >> 24)};
-                    std::fwrite(bytes, 1u, 4u, f);
-                };
-                const unsigned pcmBytes = static_cast<unsigned>(pcm.size() * 2u);
-                std::fwrite("RIFF", 1u, 4u, f);
-                put(8u + pcmBytes);
-                std::fwrite("WAVEfmt ", 1u, 8u, f);
-                put(16u);
-                put(1u);
-                put(1u);
-                put(44100u);
-                put(88200u);
-                put(2u);
-                put(16u);
-                std::fwrite("data", 1u, 4u, f);
-                put(pcmBytes);
-                std::fwrite(pcm.data(), 1u, pcmBytes, f);
-                std::fclose(f);
-                OA_LOG(oa::LogLevel::Info, "app", "wrote {} PCM bytes as WAV to '{}'", pcmBytes, config.str("wavOut"));
-            } else {
+            if (!writeWav(config.str("wavOut"), pcm.data(), pcm.size(), 44100u)) {
                 OA_LOG(oa::LogLevel::Error, "app", "--wavOut path '{}' unwritable", config.str("wavOut"));
                 return 2;
             }
@@ -1124,6 +1136,68 @@ int main(int argc, char** argv) {
         } else {
             audio.push(pcm.data(), pcm.size());
             OA_LOG(oa::LogLevel::Info, "app", "sound fixture: {} samples handed to the device", pcm.size());
+        }
+    }
+    // --shippedSound=<path or 8-hex record hash> plays a shipped stream instead of the fixture: the first stored type-6
+    // section whose payload passes frameAdpcmStream (AUDIO.md §7 [V-data]: twelve-byte {rate, loopStart, loopEnd} header
+    // plus whole §3 blocks), decoded through the engine's block path and handed to the same device. --wavOut writes it too.
+    if (!config.str("shippedSound").empty()) {
+        oa::cdc::BigfileSet archive;
+        std::string soundError;
+        if (!archive.open(config.str("gameDir"), &soundError)) {
+            OA_LOG(oa::LogLevel::Error, "app", "--shippedSound needs a readable container: {}", soundError);
+            return 2;
+        }
+        const std::string wanted = config.str("shippedSound");
+        auto record = archive.find(wanted);
+        if (!record && wanted.size() == 8u) {
+            const auto wantedHash = static_cast<std::uint32_t>(std::strtoul(wanted.c_str(), nullptr, 16));
+            for (std::size_t i = 0; i < archive.records().size(); ++i) {
+                if (archive.records()[i].hash == wantedHash) {
+                    record = i;
+                    break;
+                }
+            }
+        }
+        if (!record) {
+            OA_LOG(oa::LogLevel::Error, "app", "no record for '{}'", wanted);
+            return 2;
+        }
+        const std::vector<std::byte> unitImage = archive.read(*record, &soundError);
+        oa::cdc::DrmFile drm;
+        if (unitImage.empty() || !oa::cdc::DrmFile::parse(unitImage, &drm, &soundError)) {
+            OA_LOG(oa::LogLevel::Error, "app", "'{}' is not a DRM unit: {}", wanted, soundError);
+            return 2;
+        }
+        bool played = false;
+        for (const auto& section : drm.sections()) {
+            if (!section.stored || section.type != 6u) continue;
+            oa::cdc::AdpcmStream stream;
+            if (!oa::cdc::frameAdpcmStream(drm.payload(section), &stream)) continue;
+            std::vector<std::int16_t> pcm((stream.blocks.size() / 36u) * 64u);
+            oa::cdc::decodeAdpcmBlocks(stream.blocks, pcm.data());
+            OA_LOG(oa::LogLevel::Info, "app", "shipped sound: {} blocks = {} samples at rate {}", stream.blocks.size() / 36u,
+                   pcm.size(), stream.rate);
+            if (!config.str("wavOut").empty()) {
+                if (!writeWav(config.str("wavOut"), pcm.data(), pcm.size(), stream.rate)) {
+                    OA_LOG(oa::LogLevel::Error, "app", "--wavOut path '{}' unwritable", config.str("wavOut"));
+                    return 2;
+                }
+            }
+            oa::platform::Audio audio;
+            std::string audioError;
+            if (!audio.create(stream.rate, &audioError)) {
+                OA_LOG(oa::LogLevel::Warn, "app", "no audio device: {}", audioError);
+            } else {
+                audio.push(pcm.data(), pcm.size());
+                OA_LOG(oa::LogLevel::Info, "app", "shipped stream: {} samples handed to the device", pcm.size());
+            }
+            played = true;
+            break;
+        }
+        if (!played) {
+            OA_LOG(oa::LogLevel::Error, "app", "no stored type-6 section of '{}' frames as the header-plus-whole-blocks shape (docs/formats/AUDIO.md §7's negative half)", wanted);
+            return 2;
         }
     }
     const int frameLimit = config.integer("frames", 0);
