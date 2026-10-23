@@ -14,6 +14,7 @@
 #include "platform/Window.hpp"
 #include "render/vk/VkRenderer.hpp"
 
+#include <cstring>   // std::memcmp in the boot chapter-table row key test
 #include <cstdlib>
 #include <algorithm>
 #include <chrono>
@@ -267,8 +268,48 @@ int main(int argc, char** argv) {
     // pc-w\<code>.drm, so an alias for --mesh through the game's own naming. Start positions are not read
     // from that table; where the body spawns and how the camera frames stay this file's behaviour.
     std::string meshPath = config.str("mesh");
+    bool autoScene = false;  // the boot-default path also turns strips+textures on so the scene reads like gameplay
     if (meshPath.empty() && !config.str("level").empty()) {
         meshPath = "pc-w\\" + config.str("level") + ".drm";
+    }
+    // Boot default: with a --gameDir and neither --mesh nor --level, the window draws the game's own opening area -
+    // the chapter0 row of pc-w\generalbank.drm (docs/formats/CONTAINERS.md §6.1: 400-byte rows from image offset
+    // 4,388 inside section 0; key at +0x00, area code at +0x20). Camera framing stays the documented default; no
+    // spawn position is claimed here.
+    if (meshPath.empty() && config.str("level").empty() && !config.str("gameDir").empty()) {
+        oa::cdc::BigfileSet bootArchive;
+        std::string bootError;
+        if (bootArchive.open(config.str("gameDir"), &bootError)) {
+            const auto bankRecord = bootArchive.find("pc-w\\generalbank.drm");
+            if (bankRecord) {
+                const std::vector<std::byte> bankImage = bootArchive.read(*bankRecord, &bootError);
+                oa::cdc::DrmFile bank;
+                if (!bankImage.empty() && oa::cdc::DrmFile::parse(bankImage, &bank, &bootError) && !bank.sections().empty()) {
+                    const oa::cdc::DrmSection& first = bank.sections()[0];
+                    const std::span<const std::byte> table = bank.payload(first);
+                    constexpr const std::size_t rowBytes = 400u;
+                    constexpr const std::size_t tableOffset = 4388u;
+                    if (first.stored && table.size() > tableOffset + rowBytes) {
+                        for (std::size_t row = tableOffset; row + rowBytes <= table.size(); row += rowBytes) {
+                            const auto key = table.data() + row;
+                            if (std::memcmp(key, "chapter0", 8u) != 0) continue;
+                            char code[16] = {0};
+                            std::size_t n = 0;
+                            while (n < 15u && static_cast<unsigned char>(table[row + 0x20 + n]) >= 0x20u) {
+                                code[n] = static_cast<char>(table[row + 0x20 + n]);
+                                ++n;
+                            }
+                            if (n > 0u) {
+                                meshPath = std::string("pc-w\\") + code + ".drm";
+                                OA_LOG(oa::LogLevel::Info, "app", "boot level: '{}' ({})", meshPath, code);
+                                autoScene = true;
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
     }
     if (!meshPath.empty()) {
         oa::cdc::BigfileSet archive;
@@ -346,7 +387,7 @@ int main(int argc, char** argv) {
         // (docs/formats/GEOMETRY.md §23, Milestone 4's experiment a): material indices ride the gated
         // triangles as drawMaterials, and after the walk they are grouped per material against the base
         // table's class/value words — one contiguous index run per material, one page per run.
-        const bool wantTextures = config.flag("textures", false);
+        const bool wantTextures = config.flag("textures", false) || autoScene;   // the boot-default scene binds shipped pages too
         std::vector<std::int32_t> drawMaterials;   // one matIdx per triangle in drawIndices
         std::vector<std::size_t> drawTable;   // which base table each drawn triangle's tree used (§27)
         std::vector<std::uint32_t> groupedIndices; // drawIndices reordered into per-material runs
@@ -356,7 +397,7 @@ int main(int argc, char** argv) {
         std::vector<std::uint32_t> drawIndices;   // the gated copy handed to the GPU
         std::uint32_t coarseTriangles = 0;
         constexpr double kMaxEdgeSquared = 1000.0 * 1000.0;   // world units squared, see the gate below
-        if (config.flag("strips", false)) {
+        if (autoScene || config.flag("strips", false)) {
             std::uint32_t trees = 0;
             std::uint32_t records = 0;
             std::uint32_t heads = 0;

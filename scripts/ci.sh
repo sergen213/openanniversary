@@ -68,6 +68,14 @@ if [[ -n "${OA_GAME_DIR:-}" ]]; then
         echo "FAIL: no shipped type-6 section framed in lara.drm (AUDIO.md §7 regression)" >&2
         exit 1
     fi
+    # Boot-default regression: with --gameDir alone the window must resolve the shipped opening area from
+    # generalbank.drm and draw it (GEOMETRY.md §32); silence means either the chapter table moved or the auto-scene path broke.
+    boot_log="$scratch/boot.log"
+    "$scratch/plain/oa-game" --selfCheck=false --frames=1 --gameDir="$OA_GAME_DIR" >"$boot_log" 2>&1 || true
+    if ! grep -q 'boot level:' "$boot_log"; then
+        echo "FAIL: oa-game with only --gameDir loaded no boot level from generalbank.drm (GEOMETRY.md §32 regression)" >&2
+        exit 1
+    fi
 fi
 echo "== 3/3 unit tests under ASan+UBSan =="
 # Display path is excluded here on purpose: vendor code (SDL/driver) leaks by design and would mask real findings.
