@@ -21,14 +21,18 @@ gameplay are still ahead. See `CHANGELOG.md`, `docs/ARCHITECTURE.md` and `docs/R
 
 ## Building
 
+Full third-party instructions — how to get SDL3/Vulkan/glslang and run against your own copy — are in
+[`docs/BUILDING.md`](docs/BUILDING.md). The short form:
+
 ```sh
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug   # find_package needs zlib, SDL3, Vulkan (loader only), glslangValidator
 ninja -C build
 ctest --test-dir build --output-on-failure      # unit tests, no game data required
 ```
 
-Requirements: CMake ≥ 3.28, a C++23 compiler (GCC 16 / Clang 23 verified), zlib, GoogleTest.
-Vulkan SDK + SDL3 are added with the rendering layer; see `docs/ENVIRONMENT.md` for the verified toolchain.
+Requirements: CMake ≥ 3.28, a C++23 compiler (GCC 16 / Clang 23 verified), zlib, GoogleTest, SDL3,
+Vulkan loader + headers (the full Vulkan SDK is **not** required), and `glslangValidator` for the shaders.
+See `docs/ENVIRONMENT.md` for the verified toolchain and `docs/BUILDING.md` for the acquisition recipe.
 
 ## Tools
 
@@ -50,6 +54,7 @@ oa-asset "<install dir>" extract --path 'pc-w\lara.drm' --out lara.drm
 | --- | --- |
 | `docs/ENVIRONMENT.md` | Verified host/toolchain facts the project is developed against |
 | `docs/formats/CONTAINERS.md` | cdc bigfile layout, path hashing, specialisation masks, evidence trail |
+| `docs/BUILDING.md` | Third-party build + run instructions (SDL3/Vulkan/glslang acquisition, running on your own install) |
 | `docs/RESEARCH.md` | Prior art and community documentation, with links |
 | `docs/EXISTING_PROJECT_AUDIT.md` | What the existing local reimplementation projects already contain |
 

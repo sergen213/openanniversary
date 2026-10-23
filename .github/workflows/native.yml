@@ -1,7 +1,9 @@
 name: native
 
-# Mirrors scripts/ci.sh (the canonical pipeline). This workflow has never executed yet: the repository has no remote,
-# so treat the runner package set below as unverified until the first green run.
+# Mirrors scripts/ci.sh (the canonical pipeline). Two non-obvious configure dependencies are installed explicitly:
+# glslangValidator (CMake find_program(... REQUIRED) compiles the four GLSL shaders to SPIR-V at build time) and
+# libvulkan-dev (the renderer uses the raw Vulkan loader and <SDL3/SDL_vulkan.h>, satisfied by CMake's built-in
+# FindVulkan, so the full Vulkan SDK is not needed on the runner).
 
 on:
   push:
@@ -17,7 +19,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential cmake ninja-build pkg-config git ca-certificates \
+            build-essential cmake ninja-build pkg-config git ca-certificates glslang \
             zlib1g-dev libgtest-dev libvulkan-dev mesa-vulkan-drivers xvfb x11-apps \
             libx11-dev libxext-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
             libwayland-dev wayland-protocols libdecor-0-dev libasound2-dev libpulse-dev libdbus-1-dev

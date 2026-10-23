@@ -1,9 +1,19 @@
 # Changelog
 
-All notable changes to this project are documented here. The format follows Keep a Changelog; the project starts at
-zero version and has no releases yet.
+All notable changes to this project are documented here. The format follows Keep a Changelog. Releases are git tags
+(`v*`) mirrored as GitHub Releases; the first tagged release is `v0.1.0` (below). Anything landed after it goes under
+[Unreleased].
 
 ## [Unreleased]
+
+*(Nothing tagged as of v0.1.0. Milestones 4–7 are still in progress; their open items and measured numbers live in
+`docs/ROADMAP.md` and `docs/TESTING.md`, not as unreleased changelog entries.)*
+
+## v0.1.0 — pre-alpha foundation (2026-10-23)
+
+Native Linux build (SDL3 + Vulkan, no Wine at runtime), warning-clean, 67 data-free unit tests green, and the
+canonical pipeline `scripts/ci.sh` verified end-to-end on the dev host. Milestones 1–3 complete (container + DRM/texture
+census verified against the shipped archive); 4–7 in progress. No game assets or proprietary binaries ship in the repo.
 
 ### Added
 
