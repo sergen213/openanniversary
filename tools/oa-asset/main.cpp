@@ -59,7 +59,7 @@ bool parseHex(const std::string& text, std::uint32_t& value) {
 
 bool parseArgs(int argc, char** argv, Options& opt, std::string& error) {
     if (argc < 3) {
-        error = "usage: oa-asset <game-dir> <list|hash|resolve|extract|drm|texture|terrain> [options]";
+        error = "usage: oa-asset <game-dir> <list|hash|resolve|extract|drm|texture|terrain|terrper> [options]";
         return false;
     }
     opt.directory = argv[1];
@@ -561,6 +561,70 @@ int main(int argc, char** argv) {
         for (bool r : referenced) if (r) ++referencedCount;
         std::printf("vertices reached by these chains: %u of %u in section 0\n", referencedCount, vertexCount);
         std::fprintf(stderr, "%zu oct-tree section(s)\n", trees);
+        return 0;
+    }
+
+    if (opt.command == "terrper") {   // §25 measurement: per-tree base-table choice, both rules side by side
+        const auto index = findRecord(archive, opt);
+        if (!index) return fail("terrper needs --hash or --path that matches a record");
+        const auto data = archive.read(*index, &error);
+        if (data.empty() && !error.empty()) return fail(error);
+        oa::cdc::DrmFile drm;
+        std::string drmError;
+        if (!oa::cdc::DrmFile::parse(data, &drm, &drmError)) return fail("DRM: " + drmError);
+        constexpr std::size_t kRecordBytes = 20;   // §2's stride-20 vertex record
+        const auto& array = drm.sections()[0];
+        if (!array.stored || array.size % kRecordBytes != 0u) return fail("section 0 is not a stride-20 vertex array");
+        const std::span<const std::byte> vertices = drm.payload(array);
+        const auto vertexCount = static_cast<std::uint32_t>(vertices.size() / kRecordBytes);
+        const auto i16At = [](const std::span<const std::byte> p, std::size_t at) {
+            return static_cast<std::int32_t>(static_cast<unsigned>(p[at]) | (static_cast<unsigned>(p[at + 1u]) << 8u));
+        };
+        const auto edgeOf = [&](std::uint32_t a, std::uint32_t b) {
+            double squared = 0.0;
+            for (int axis = 0; axis < 3; ++axis) {
+                const double delta = static_cast<double>(i16At(vertices, static_cast<std::size_t>(a) * kRecordBytes + 2u * axis)) -
+                                     static_cast<double>(i16At(vertices, static_cast<std::size_t>(b) * kRecordBytes + 2u * axis));
+                squared += delta * delta;
+            }
+            return std::sqrt(squared);
+        };
+        using Rule = oa::cdc::TerrainTableRule;
+        for (const auto rule : {Rule::firstCovering, Rule::shortestCovering, Rule::relocNamed, Rule::relocOrFirstCovering}) {
+            std::vector<oa::cdc::TerrainTreeWalk> trees;
+            std::string why;
+            if (!oa::cdc::decodeTerrainUnit(drm, 0u, rule, &trees, &why)) return fail(why);
+            std::printf("%s\n", rule == Rule::firstCovering ? "first-covering rule (§21):" : rule == Rule::shortestCovering ? "shortest-covering rule:" : rule == Rule::relocNamed ? "reloc-named rule (§26):" : "reloc-or-first-covering hybrid:");
+            for (const auto& walk : trees) {
+                std::vector<std::uint32_t> tris;
+                std::uint32_t records = 0, heads = 0, badHeads = 0, broken = 0, unknown = 0;
+                for (const auto& entry : walk.byPayload) {
+                    records += entry.second.records; heads += entry.second.heads;
+                    badHeads += entry.second.badHeads; broken += entry.second.brokenLinks;
+                    unknown += entry.second.unknownMaterials;
+                    tris.insert(tris.end(), entry.second.indices.begin(), entry.second.indices.end());
+                }
+                std::vector<double> edges;
+                edges.reserve(tris.size());
+                for (std::size_t t = 0; t + 2 < tris.size(); t += 3u) {
+                    const auto a = tris[t], b = tris[t + 1u], c = tris[t + 2u];
+                    edges.push_back(edgeOf(a, b)); edges.push_back(edgeOf(b, c)); edges.push_back(edgeOf(c, a));
+                }
+                std::sort(edges.begin(), edges.end());
+                const auto pct = [&edges](double f) {
+                    return edges.empty() ? 0.0 : edges[std::min(edges.size() - 1u, static_cast<std::size_t>(f * static_cast<double>(edges.size())))];
+                };
+                std::size_t longEdges = 0;
+                for (double e : edges) if (e > 2000.0) ++longEdges;
+                std::uint32_t low = vertexCount, high = 0u;
+                for (std::uint32_t v : tris) { low = std::min(low, v); high = std::max(high, v); }
+                std::printf("  tree section %-4zu table %4lld refs=%-3u | heads=%-5u records=%-5u badHeads=%-3u broken=%-3u unknown=%-4u "
+                            "tris=%-7zu idx %6u..%6u p50=%6.0f p99=%7.0f over2000=%.2f%%\n",
+                            walk.nodeSection, static_cast<long long>(walk.tableSection), walk.tableReferences,
+                            heads, records, badHeads, broken, unknown, tris.size() / 3u, low, high, pct(0.5), pct(0.99),
+                            edges.empty() ? 0.0 : 100.0 * static_cast<double>(longEdges) / static_cast<double>(edges.size()));
+            }
+        }
         return 0;
     }
 

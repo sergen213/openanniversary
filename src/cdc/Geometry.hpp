@@ -156,4 +156,35 @@ bool decodeTerrainMaterialBases(std::span<const std::byte> payload, const std::v
 bool findTerrainMaterialBases(const DrmFile& drm, std::uint32_t vertexArraySection, TerrainMaterialList* out,
                               std::size_t* sectionOut = nullptr, std::string* error = nullptr);
 
+// How one oct-tree's per-material vertex bases get chosen (docs/formats/GEOMETRY.md §26 measured the third rule: on
+// unit 8baf540e every tree's strip payloads kind-0-relocate exactly ONE of the unit's §20-shaped candidate tables, and
+// that table differs per tree - 77->141 x160, 86->160, 131->206, 140->153, 165->191, 190->188 - while §21's unit-wide
+// census picked 141 for all nine trees; three small trees name no candidate table at all).
+enum class TerrainTableRule { firstCovering = 0, shortestCovering = 1, relocNamed = 2, relocOrFirstCovering = 3 };
+
+// One oct-tree of a level unit decoded the way §15/§20 walk it, plus the base table its OWN material census picked.
+// §21 picks ONE table for the whole unit; this split asks whether the coarse remainder (§20 open item 3) is explained by
+// trees that belong to different groups — the same-shaped runs at sections 153/160/188/191/206 of `8baf540e` carry
+// bases (79,702 / 95,369 / 111,332 ...) that a per-tree census could select. Nothing here claims that is true: the
+// caller compares what each rule produces on real units (docs/formats/GEOMETRY.md §25).
+struct TerrainTreeWalk {
+    std::size_t nodeSection = 0;                                        // section holding this oct-tree's nodes
+    std::size_t tableSection = static_cast<std::size_t>(-1);            // chosen base table's section, -1 when none covers
+    TerrainTableRule rule = TerrainTableRule::firstCovering;          // the rule that actually picked (for logging)
+    std::uint32_t tableReferences = 0;                                // §26: payload relocations naming the chosen table
+    // strip payload section -> its chain walk for this tree (§15 enters chains only from leaf references).
+    std::vector<std::pair<std::size_t, TerrainStripChain>> byPayload;
+};
+
+// Decodes every oct-tree in the unit. `vertexArraySection` is where the stride-20 vertex array lives (section 0 for
+// level units, §2). For each tree: walk its leaf groups once base-free to census header +20 matIdx values (§10), then
+// pick a candidate table — the first decoded run covering the census when `preferShortestTable` is false (the rule
+// §21 measured), or the shortest covering run when true — and re-walk with that table's bases applied. Candidate
+// tables are collected once per unit from every section whose own-section kind-0 slots pass §20's detector, so a
+// wrong pick cannot invent geometry: capacity failures still land in badHeads/unknownMaterials. Fails only when the
+// unit holds no oct-tree at all or `vertexArraySection` is out of range; trees that decode to nothing keep their entry
+// with empty byPayload so callers can report per tree honestly.
+bool decodeTerrainUnit(const DrmFile& drm, std::uint32_t vertexArraySection, TerrainTableRule tableRule,
+                       std::vector<TerrainTreeWalk>* out, std::string* error = nullptr);
+
 }  // namespace oa::cdc

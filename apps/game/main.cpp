@@ -348,6 +348,7 @@ int main(int argc, char** argv) {
         // table's class/value words — one contiguous index run per material, one page per run.
         const bool wantTextures = config.flag("textures", false);
         std::vector<std::int32_t> drawMaterials;   // one matIdx per triangle in drawIndices
+        std::vector<std::size_t> drawTable;   // which base table each drawn triangle's tree used (§27)
         std::vector<std::uint32_t> groupedIndices; // drawIndices reordered into per-material runs
         std::vector<oa::render::MeshBatch> materialBatches;
         std::vector<oa::render::TextureUpload> materialPages;
@@ -361,56 +362,47 @@ int main(int argc, char** argv) {
             std::uint32_t heads = 0;
             std::uint32_t badHeads = 0;
             std::uint32_t brokenLinks = 0;
-            // §20 + sweep-bases3 (GEOMETRY.md §21): a strip record's indices are relative to its material's block of this vertex
-            // array, and the unit stores each block's base in a section of its own. findTerrainMaterialBases walks every tree once
-            // without bases first — which same-shaped run is THE table answers from the matIdx values (header +20) those chains
-            // name: take the first decoded table whose length covers them all. Units with no covering table stay absolute (§13).
-            oa::cdc::TerrainMaterialList materials;
-            bool haveMaterials = false;
-            std::string tableError;   // names the refusing rule when no section's run covers this unit's chains (§21)
-            if (oa::cdc::findTerrainMaterialBases(drm, 0u, &materials, nullptr, &tableError)) {   // §21 census rule
-                haveMaterials = true;
-            }   // no else needed; §13's absolute reading stands when the census finds nothing to cover
-            for (std::size_t i = 0; i < drm.sections().size(); ++i) {
-                const oa::cdc::DrmSection& nodeSection = drm.sections()[i];
-                if (!nodeSection.stored || nodeSection.relocCount == 0) continue;
-                std::map<std::uint32_t, std::pair<std::uint32_t, std::uint32_t>> references;
-                for (const auto& r : drm.relocations(nodeSection)) {
-                    if (oa::cdc::relocKind(r) != 0) continue;   // node fields are patched by kind-0 entries (§9)
-                    references[static_cast<std::uint32_t>(r.siteOffset)] = {
-                        static_cast<std::uint32_t>(oa::cdc::relocSectionIndex(r)), drm.relocAddend(nodeSection, r)};
-                }
-                oa::cdc::TerrainOctree tree;
+            // §20/§21 + §26/§27 measurement (openanniversary-work relotree and sweep-trees): a strip record's indices are
+            // relative to its material's block of the unit's stride-20 vertex array, and each oct-tree owns one of the unit's
+            // same-shaped base tables - the payloads' own kind-0 relocations name it (8baf540e: 77->141 x160, 86->160 x76,
+            // 131->206, 140->153, 165->191, 190->188), and those picks tile the array: coverage of referenced vertices rises
+            // 0.305 -> 0.983 there while §21's unit-wide census (every tree on table 141) leaves ranges overlapping. Trees
+            // whose payloads name no candidate fall back to the first covering census run, which never loses coverage install-
+            // wide (mean referenced fraction 0.666 -> 0.732 over all 50 oct-tree units). decodeTerrainUnit walks trees,
+            // chains and bases once so this caller cannot drift a second copy of the walk; capacity/coverage failures land in
+            // TerrainStripChain's counters instead of drawing junk (§19's edge gate keeps coarse triangles off the grid too).
+            std::vector<oa::cdc::TerrainTreeWalk> walks;
+            std::string walkError;   // names the refusing rule when the unit has no oct-tree at all (§15)
+            if (!oa::cdc::decodeTerrainUnit(drm, 0u, oa::cdc::TerrainTableRule::relocOrFirstCovering, &walks, &walkError)) {
+                OA_LOG(oa::LogLevel::Warn, "app", "'{}' strips skipped: {}", meshPath, walkError);
+            }
+            // §23's texture binding needs each chosen table's class/value words; fetch the same §20 detector the selection
+            // used so a material index is looked up in the table that actually indexed its block.
+            std::map<std::size_t, oa::cdc::TerrainMaterialList> tableCache;
+            const auto tableFor = [&](std::size_t section) -> oa::cdc::TerrainMaterialList* {
+                if (section >= drm.sections().size()) return nullptr;
+                const auto known = tableCache.find(section);
+                if (known != tableCache.end()) return &known->second;
+                oa::cdc::TerrainMaterialList list;
                 std::string why;
-                if (!oa::cdc::decodeTerrainOctree(drm.payload(nodeSection), references, &tree, &why)) continue;
+                if (!oa::cdc::decodeTerrainMaterialBases(drm.payload(drm.sections()[section]), drm.relocations(drm.sections()[section]),
+                                                        static_cast<std::uint32_t>(section), &list, &why)) return nullptr;
+                return &tableCache.emplace(section, std::move(list)).first->second;
+            };
+            bool texturedNeedsTable = false;   // a tree whose matIdx no candidate covers (§13's absolute reading)
+            for (const auto& walk : walks) {
                 ++trees;
-                std::map<std::uint32_t, std::vector<std::uint32_t>> headsPerSection;
-                for (const auto& leaf : tree.leafList) {
-                    if (leaf.targetSection >= drm.sections().size()) continue;
-                    headsPerSection[leaf.targetSection].push_back(leaf.offsetInTarget);
-                }
-                for (const auto& entry : headsPerSection) {
-                    const oa::cdc::DrmSection& strip = drm.sections()[entry.first];
-                    if (!strip.stored) continue;
-                    oa::cdc::TerrainStripChain walked;
-                    std::string chainError;
-                    if (!oa::cdc::decodeTerrainStripChains(
-                            drm.payload(strip), entry.second, vertices.size(), &walked, &chainError,
-                            haveMaterials ? std::span<const std::uint32_t>(materials.vertexBase)
-                                          : std::span<const std::uint32_t>{})) {
-                        OA_LOG(oa::LogLevel::Warn, "app", "section {} of '{}' chains skipped: {}", entry.first, meshPath,
-                               chainError);
-                        continue;
-                    }
+                if (walk.tableSection == static_cast<std::size_t>(-1)) texturedNeedsTable = true;
+                for (const auto& entry : walk.byPayload) {
+                    const oa::cdc::TerrainStripChain& walked = entry.second;   // bases already applied by the library (§20)
                     records += walked.records;
                     heads += walked.heads;
                     badHeads += walked.badHeads;
                     brokenLinks += walked.brokenLinks;
-                    // Gate what goes to the screen, which is also what a foot probes through the terrain grid (§19). With
-                    // §20's bases in place almost every triangle is tight (unit 4956BEA0: p50 edge 153 units); a residual
-                    // population still lands at thousands of units, so an edge gate like the one §18 tried keeps it off -
-                    // non-degenerate (shortest edge over 1 unit) and longest edge under 1,000 units. Those triangles are
-                    // counted in `coarseTriangles` and left undrawn, not guessed at.
+                    // Gate what goes to the screen, which is also what a foot probes through the terrain grid (§19):
+                    // non-degenerate (shortest edge over 1 unit) and longest edge under 1,000 units. Coarse triangles
+                    // stay counted (`coarseTriangles`) rather than guessed at - with §27's per-tree tables most of what
+                    // used to be gated is now tight real geometry instead of wrong-block noise.
                     for (std::size_t t = 0; t + 2 < walked.indices.size(); t += 3u) {
                         const auto& a = vertices[walked.indices[t]];
                         const auto& b = vertices[walked.indices[t + 1u]];
@@ -425,6 +417,7 @@ int main(int argc, char** argv) {
                         drawIndices.insert(drawIndices.end(), {walked.indices[t], walked.indices[t + 1u], walked.indices[t + 2u]});
                         drawMaterials.push_back(t / 3u < walked.materialOfTriangle.size()   // §10: the matIdx rides each chain record
                                                 ? walked.materialOfTriangle[t / 3u] : -1);
+                        drawTable.push_back(walk.tableSection);
                     }
                 }
             }
@@ -434,23 +427,15 @@ int main(int argc, char** argv) {
                    trees, heads, records, drawIndices.size() / 3u, stripIndices.size() / 3u,
                    vertices.size(), coarseTriangles, badHeads, brokenLinks);
             if (wantTextures) {
-                if (!haveMaterials) {
-                    OA_LOG(oa::LogLevel::Error, "app", "--textures needs the material base table: {}", tableError);
-                    return 2;
-                }
-                // Group the gated triangles by material so each material gets one contiguous index run and one
-                // bound page. §21: a class-32 material's +12 low half names the unit section holding its PCD9
-                // page; any other class, an out-of-range id, or a section that is not a decodable PCD9 keeps
-                // kNoTexture — that run draws the shipped vertex colours alone, with no guessing.
-                std::map<std::int32_t, std::vector<std::uint32_t>> runs;
+                // §27's tables differ per tree, so a run is keyed by (table section, matIdx): the same material index
+                // means different pages under different tables, and merging them would bind the wrong texture. A tree
+                // whose chains name no covering table (§13's absolute reading) keeps vertex colours alone - nothing guessed.
+                std::map<std::pair<std::size_t, std::int32_t>, std::vector<std::uint32_t>> runs;
                 for (std::size_t tri = 0; tri < drawMaterials.size(); ++tri) {
                     const auto material = drawMaterials[tri];
-                    if (material < 0 || static_cast<std::size_t>(material) >= materials.classValue.size()) {
-                        OA_LOG(oa::LogLevel::Error, "app", "--textures: a chain names material {} outside the base table's {} entries", material, materials.classValue.size());
-                        return 2;
-                    }
+                    if (material < 0) continue;   // §10: a chain record naming no material stays untextured (§23's kNoTexture run)
                     for (int k = 0; k < 3; ++k) {
-                        runs[material].push_back(drawIndices[3u * tri + static_cast<std::size_t>(k)]);
+                        runs[{drawTable[tri], material}].push_back(drawIndices[3u * tri + static_cast<std::size_t>(k)]);
                     }
                 }
                 std::map<std::uint32_t, std::uint32_t> pageById;   // section index -> index into materialPages, deduped
@@ -465,12 +450,16 @@ int main(int argc, char** argv) {
                     oa::render::MeshBatch batch;   // defaults: no page bound (white, colours only)
                     batch.indexStart = static_cast<std::uint32_t>(groupedIndices.size());
                     batch.indexCount = static_cast<std::uint32_t>(entry.second.size());
-                    const std::uint32_t packed = materials.classValue[static_cast<std::size_t>(entry.first)];
+                    const oa::cdc::TerrainMaterialList* treeTable = tableFor(entry.first.first);   // §27: the table that indexed this run
+                    const std::int32_t materialId = entry.first.second;
+                    const bool namedByTable = treeTable != nullptr && materialId >= 0 &&
+                                             static_cast<std::size_t>(materialId) < treeTable->classValue.size();
+                    const std::uint32_t packed = namedByTable ? treeTable->classValue[static_cast<std::size_t>(materialId)] : 0u;
                     const uint32_t idClass = packed >> 16u, pageId = packed & 0xFFFFu;
                     if (idClass == 32u) {   // §21: class 32 names the texture page; other classes stay open
                         const auto named = pageSlot.find(pageId);
                         if (named == pageSlot.end()) {
-                            OA_LOG(oa::LogLevel::Warn, "app", "--textures: material {} names page id {}, which matches no stored type-5 section of this unit", entry.first, pageId);
+                            OA_LOG(oa::LogLevel::Warn, "app", "--textures: material {} names page id {}, which matches no stored type-5 section of this unit", materialId, pageId);
                         } else {
                             auto known = pageById.find(static_cast<std::uint32_t>(named->second));
                             if (known == pageById.end()) {
@@ -481,7 +470,7 @@ int main(int argc, char** argv) {
                                     oa::render::TextureUpload upload;
                                     upload.format = pcd9VkFormat(page);
                                     if (upload.format == VK_FORMAT_UNDEFINED) {
-                                        OA_LOG(oa::LogLevel::Warn, "app", "--textures: material {}'s page (section {}) has PCD9 tag {}, which has no Vulkan format", entry.first, named->second, page.tag);
+                                        OA_LOG(oa::LogLevel::Warn, "app", "--textures: material {}'s page (section {}) has PCD9 tag {}, which has no Vulkan format", materialId, named->second, page.tag);
                                     } else {
                                         upload.width = page.width;
                                         upload.height = page.height;
@@ -496,7 +485,7 @@ int main(int argc, char** argv) {
                                         known = pageById.find(static_cast<std::uint32_t>(named->second));
                                     }
                                 } else {
-                                    OA_LOG(oa::LogLevel::Warn, "app", "--textures: material {}'s id {} resolves to section {}, which is not a decodable PCD9: {}", entry.first, pageId, named->second, why);
+                                    OA_LOG(oa::LogLevel::Warn, "app", "--textures: material {}'s id {} resolves to section {}, which is not a decodable PCD9: {}", materialId, pageId, named->second, why);
                                 }
                             }
                             if (known != pageById.end()) batch.material = known->second;

@@ -444,4 +444,103 @@ TEST(TerrainStrips, refusesARecordOutsideItsMaterialBlock) {
     EXPECT_TRUE(refused.indices.empty());
 }
 
+// A whole v14 unit image laid out the way tests/test_drm.cpp's buildImage does (DRM.md §2): 28-byte header, 20-byte section
+// records, block A + extra region, then each section's 8-byte relocation entries followed by its payload. Relocation entries
+// carry the stored target section, one past our directory index (Drm.hpp relocSectionIndex).
+struct UnitSection {
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> relocs;   // {kind | storedSection << 3, slot offset}
+    std::vector<std::byte> payload;
+};
+std::vector<std::byte> buildUnit(const std::vector<UnitSection>& sections) {
+    std::vector<std::byte> out;
+    for (std::uint32_t word : {14u, static_cast<std::uint32_t>(sections.size()), 8u, 0u, 1280u, 0u, 0xFFFFFFFFu}) {
+        putU32(out, word);
+    }
+    std::vector<std::byte> bodies;
+    for (const auto& s : sections) {
+        putU32(out, static_cast<std::uint32_t>(s.payload.size()));
+        putU32(out, 0u);                                                  // type 0, flags 0, versionId 0
+        putU32(out, static_cast<std::uint32_t>(s.relocs.size()) << 8u);   // relocation count in bits 8-31
+        putU32(out, 0u);                                                  // id
+        putU32(out, 0xFFFFFFFFu);                                         // specMask
+        for (const auto& [word, site] : s.relocs) {
+            putU32(bodies, word);
+            putU32(bodies, site);
+        }
+        bodies.insert(bodies.end(), s.payload.begin(), s.payload.end());
+    }
+    for (std::uint32_t i = 0; i < 8u; i += 4) putU32(out, i * 7u);   // block A
+    out.resize(out.size() + 20u);                                       // extra region
+    out.insert(out.end(), bodies.begin(), bodies.end());
+    return out;
+}
+
+// A §20 table in section `self`: records at stride 20 whose +8 slot a kind-0 entry patches to the same section.
+UnitSection table(std::uint32_t self, const std::vector<std::uint32_t>& bases) {
+    UnitSection out;
+    for (std::size_t k = 0; k < bases.size(); ++k) {
+        putU32(out.payload, bases[k]);
+        putU32(out.payload, 0u);
+        putU32(out.payload, 0x1234u);
+        putU32(out.payload, 7u);
+        putU32(out.payload, 0u);
+        out.relocs.emplace_back((self + 1u) << 3u, static_cast<std::uint32_t>(20u * k + 8u));
+    }
+    return out;
+}
+
+TEST(TerrainTableRule, HybridPicksPerTreeTables) {
+    // Section 0: 64 vertices. 1: long table (material 5 at vertex 10). 2: short table (material 5 at vertex 20). Both
+    // cover the census (matIdx 5). 3/4: one-record strip payloads, each kind-0-relocating a different table from header +4.
+    // 5/6: single-leaf oct-trees whose +16 slot names payload 3 and payload 4 respectively.
+    const UnitSection vertices{{}, std::vector<std::byte>(64u * kMeshVertexBytes)};
+    const UnitSection longTable = table(1u, {0, 0, 0, 0, 0, 10, 10, 10, 10, 10, 10, 10});
+    const UnitSection shortTable = table(2u, {0, 0, 0, 0, 0, 20, 20, 20});
+    const UnitSection payloadA{{{(1u + 1u) << 3u, 4u}}, strip(3, 5, 0u, {0, 1, 2})};
+    const UnitSection payloadB{{{(2u + 1u) << 3u, 4u}}, strip(3, 5, 0u, {0, 1, 2})};
+    const UnitSection treeA{{{(3u + 1u) << 3u, 16u}}, node(0u, 0u, {})};
+    const UnitSection treeB{{{(4u + 1u) << 3u, 16u}}, node(0u, 0u, {})};
+    const auto image = buildUnit({vertices, longTable, shortTable, payloadA, payloadB, treeA, treeB});
+
+    oa::cdc::DrmFile drm;
+    std::string error;
+    ASSERT_TRUE(oa::cdc::DrmFile::parse(image, &drm, &error)) << error;
+    ASSERT_EQ(drm.sections().size(), 7u);
+
+    const auto run = [&](oa::cdc::TerrainTableRule rule) {
+        std::vector<oa::cdc::TerrainTreeWalk> walks;
+        std::string why;
+        EXPECT_TRUE(oa::cdc::decodeTerrainUnit(drm, 0u, rule, &walks, &why)) << why;
+        EXPECT_EQ(walks.size(), 2u);   // only sections 5 and 6 decode as oct-trees
+        return walks;
+    };
+    const auto firstIndices = [](const oa::cdc::TerrainTreeWalk& walk) {
+        return walk.byPayload.empty() ? std::vector<std::uint32_t>{} : walk.byPayload.front().second.indices;
+    };
+
+    const auto hybrid = run(oa::cdc::TerrainTableRule::relocOrFirstCovering);
+    ASSERT_EQ(hybrid.size(), 2u);
+    EXPECT_EQ(hybrid[0].nodeSection, 5u);
+    EXPECT_EQ(hybrid[0].tableSection, 1u);
+    EXPECT_EQ(hybrid[0].tableReferences, 1u);
+    EXPECT_EQ(firstIndices(hybrid[0]), (std::vector<std::uint32_t>{10, 11, 12}));
+    EXPECT_EQ(hybrid[1].nodeSection, 6u);
+    EXPECT_EQ(hybrid[1].tableSection, 2u);
+    EXPECT_EQ(hybrid[1].tableReferences, 1u);
+    EXPECT_EQ(firstIndices(hybrid[1]), (std::vector<std::uint32_t>{20, 21, 22}));
+
+    // First covering ignores the relocations: both trees take section 1, so tree 6 silently draws the long table's bases.
+    const auto first = run(oa::cdc::TerrainTableRule::firstCovering);
+    ASSERT_EQ(first.size(), 2u);
+    EXPECT_EQ(first[0].tableSection, 1u);
+    EXPECT_EQ(first[1].tableSection, 1u);
+    EXPECT_NE(first[1].tableSection, hybrid[1].tableSection);
+    EXPECT_EQ(firstIndices(first[1]), (std::vector<std::uint32_t>{10, 11, 12}));
+
+    const auto shortest = run(oa::cdc::TerrainTableRule::shortestCovering);
+    ASSERT_EQ(shortest.size(), 2u);
+    EXPECT_EQ(shortest[0].tableSection, 2u);
+    EXPECT_EQ(shortest[1].tableSection, 2u);
+}
+
 }  // namespace

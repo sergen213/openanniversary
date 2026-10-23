@@ -344,4 +344,127 @@ bool findTerrainMaterialBases(const DrmFile& drm, std::uint32_t vertexArraySecti
     return true;
 }
 
+// Per-oct-tree walk with each tree's own base-table choice (docs/formats/GEOMETRY.md §25). The candidate runs come
+// from the same §20 detector findTerrainMaterialBases uses; only the census scope changes — one tree at a time
+// instead of every tree in the unit — and `tableRule` decides how each tree picks from that pool: §21's first covering
+// run, the shortest covering run, or the table its own strip payloads kind-0-relocate (§26 measured on unit 8baf540e
+// that every tree names exactly one candidate this way). Nothing is asserted about which rule matches the shipped
+// engine here: callers compare them on real units, and capacity/coverage failures still land in TerrainStripChain's
+// counters rather than drawing junk.
+bool decodeTerrainUnit(const DrmFile& drm, std::uint32_t vertexArraySection, TerrainTableRule tableRule,
+                       std::vector<TerrainTreeWalk>* out, std::string* error) {
+    const auto fail = [&](const std::string& message) {
+        if (error != nullptr) *error = message;
+        return false;
+    };
+    if (out == nullptr) return fail("decodeTerrainUnit needs an output vector");
+    if (vertexArraySection >= drm.sections().size()) return fail("vertex array section index out of range");
+    const auto vertexPayload = drm.payload(drm.sections()[vertexArraySection]);
+    if (vertexPayload.size() < kMeshVertexBytes || vertexPayload.size() % kMeshVertexBytes != 0u) {
+        return fail("section " + std::to_string(vertexArraySection) + " is not a whole number of stride-20 records");
+    }
+    const std::size_t vertexCount = vertexPayload.size() / kMeshVertexBytes;
+
+    // Candidate base tables in file order: every section whose own-section kind-0 pointer slots pass §20's narrow
+    // detector. findTerrainMaterialBases (§21) picks among exactly these for the whole unit; here each tree picks
+    // again from the same pool against its own census.
+    struct Candidate { std::size_t section; TerrainMaterialList list; };
+    std::vector<Candidate> candidates;
+    for (std::size_t i = 1; i < drm.sections().size(); ++i) {
+        const auto& candidateSection = drm.sections()[i];
+        if (!candidateSection.stored || candidateSection.relocCount == 0u) continue;
+        Candidate c{i, {}};
+        std::string why;
+        if (decodeTerrainMaterialBases(drm.payload(candidateSection), drm.relocations(candidateSection),
+                                       static_cast<std::uint32_t>(i), &c.list, &why)) {
+            candidates.push_back(std::move(c));
+        }
+    }
+
+    const auto walkPayload = [&](std::size_t payloadIndex, std::span<const std::uint32_t> heads,
+                                 std::span<const std::uint32_t> bases, TerrainStripChain& chain) {
+        decodeTerrainStripChains(drm.payload(drm.sections()[payloadIndex]), heads, vertexCount, &chain, nullptr, bases);
+    };
+    const auto censusMaxMaterial = [&](std::map<std::size_t, std::vector<std::uint32_t>>& headsPerPayload) {
+        std::int32_t maxMat = -1;
+        for (const auto& entry : headsPerPayload) {
+            TerrainStripChain walked;
+            walkPayload(entry.first, entry.second, {}, walked);
+            for (const auto m : walked.materialOfTriangle) if (m > maxMat) maxMat = m;
+        }
+        return maxMat;
+    };
+
+    std::vector<TerrainTreeWalk> trees;
+    for (std::size_t i = 1; i < drm.sections().size(); ++i) {
+        const auto& nodeSection = drm.sections()[i];
+        if (!nodeSection.stored || nodeSection.relocCount == 0u) continue;
+        std::map<std::uint32_t, std::pair<std::uint32_t, std::uint32_t>> references;
+        for (const auto& r : drm.relocations(nodeSection)) {
+            if (oa::cdc::relocKind(r) != 0u) continue;   // node fields are patched by kind-0 entries (§9)
+            references[static_cast<std::uint32_t>(r.siteOffset)] = {
+                static_cast<std::uint32_t>(oa::cdc::relocSectionIndex(r)), drm.relocAddend(nodeSection, r)};
+        }
+        TerrainOctree tree;
+        std::string why;
+        if (!decodeTerrainOctree(drm.payload(nodeSection), references, &tree, &why)) continue;
+
+        std::map<std::size_t, std::vector<std::uint32_t>> headsPerPayload;
+        for (const auto& leaf : tree.leafList) {
+            if (leaf.targetSection >= drm.sections().size()) continue;
+            headsPerPayload[leaf.targetSection].push_back(leaf.offsetInTarget);
+        }
+        if (headsPerPayload.empty()) continue;   // a tree whose leaves name no payload has nothing to walk (§9)
+
+        TerrainTreeWalk walk;
+        walk.nodeSection = i;
+        walk.rule = tableRule;
+        const auto maxMat = censusMaxMaterial(headsPerPayload);   // base-free census of this tree's own matIdx range (§10)
+        std::size_t fallbackChoice = candidates.size();
+        for (std::size_t k = 0; k < candidates.size(); ++k) {
+            if (static_cast<long long>(candidates[k].list.vertexBase.size()) > maxMat) { fallbackChoice = k; break; }
+        }
+        std::size_t shortestChoice = candidates.size();
+        for (std::size_t k = 0; k < candidates.size(); ++k) {
+            if (!(static_cast<long long>(candidates[k].list.vertexBase.size()) > maxMat)) continue;
+            if (shortestChoice == candidates.size() ||
+                candidates[k].list.vertexBase.size() < candidates[shortestChoice].list.vertexBase.size()) {
+                shortestChoice = k;
+            }
+        }
+        std::size_t namedChoice = candidates.size();
+        std::uint32_t bestCount = 0u;
+        if (tableRule == TerrainTableRule::relocNamed || tableRule == TerrainTableRule::relocOrFirstCovering) {
+            for (std::size_t k = 0; k < candidates.size(); ++k) {   // §26: the payloads' kind-0 relocations name a table
+                std::uint32_t count = 0u;
+                for (const auto& entry : headsPerPayload) {
+                    for (const auto& r : drm.relocations(drm.sections()[entry.first])) {
+                        if (relocKind(r) == 0u && relocSectionIndex(r) == candidates[k].section) ++count;
+                    }
+                }
+                if (count > bestCount) { bestCount = count; namedChoice = k; }   // most-referenced table wins ties by file order
+            }
+        }
+        const auto choice = tableRule == TerrainTableRule::firstCovering      ? fallbackChoice
+                            : tableRule == TerrainTableRule::shortestCovering ? shortestChoice
+                            : tableRule == TerrainTableRule::relocNamed       ? namedChoice
+                                                                              : (bestCount > 0u ? namedChoice : fallbackChoice);
+        walk.tableReferences = bestCount;
+        if (choice != candidates.size()) walk.tableSection = candidates[choice].section;
+        for (auto& entry : headsPerPayload) {
+            TerrainStripChain chain;
+            walkPayload(entry.first, entry.second,
+                        choice != candidates.size() ? std::span<const std::uint32_t>(candidates[choice].list.vertexBase)
+                                                   : std::span<const std::uint32_t>{},
+                        chain);
+            walk.byPayload.emplace_back(entry.first, std::move(chain));
+        }
+        trees.push_back(std::move(walk));
+    }
+    if (trees.empty()) return fail("unit has no oct-tree with leaf references to walk");
+    *out = std::move(trees);
+    if (error != nullptr) error->clear();
+    return true;
+}
+
 }  // namespace oa::cdc
