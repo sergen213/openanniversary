@@ -96,5 +96,70 @@ bool frameAdpcmStream(std::span<const std::byte> payload, AdpcmStream* out) noex
   out->blocks = std::span<const std::byte>(body, blocks * 36u);
   return true;
 }
+
+// [V-data] docs/formats/AUDIO.md §7.1 (2026-10-24): the standalone .mul records chain 32-byte segment records from
+// offset 0x800; each record is {u32 0, u32 dataBytes + 16, u32 0, u32 0, u32 dataBytes, u32 0, u32 0, u32 0} and its
+// payload of whole §3 blocks (mono) or [L block][R] pairs (stereo) starts right after it. Measured on 39/39 named
+// records: every chain closes exactly at EOF, payloads are whole multiples of 36 * channels, all 873,808 blocks pass
+// the §3 structural test, and the CINE voice-bag variant is refused by its +0x810 magic. The gate keeps every check
+// strict so a payload that merely resembles the shape cannot decode into garbage.
+bool frameMulStream(std::span<const std::byte> record, MulStream* out) noexcept {
+  if (record.size() < 0x820u + 36u) return false;  // head table plus at least one whole block after a record
+  const std::uint32_t channels = le32(record.data() + 12u);
+  if (channels != 1u && channels != 2u) return false;
+  if (le32(record.data() + 0x810u) == 0x43'49'4e'45u) return false;  // CINE voice bag: a different layout, §7.1
+  const std::size_t unit = 36u * channels;
+  out->rate = le32(record.data());
+  out->loopStartSamples = static_cast<std::int32_t>(le32(record.data() + 4u));
+  out->samplesPerChannel = le32(record.data() + 8u);
+  out->channels = channels;
+  out->segments.clear();
+  std::size_t p = 0x800u;
+  while (true) {
+    if (p + 32u > record.size()) return false;
+    const std::uint32_t sizePlus16 = le32(record.data() + p + 4u);
+    const std::uint32_t dataBytes = le32(record.data() + p + 16u);
+    if (sizePlus16 != dataBytes + 16u) return false;
+    for (const unsigned off : {0u, 8u, 12u, 20u, 24u, 28u})
+      if (le32(record.data() + p + off) != 0u) return false;
+    if (dataBytes == 0u || dataBytes % unit != 0u || p + 32u + dataBytes > record.size()) return false;
+    out->segments.emplace_back(p + 32u, dataBytes);
+    if (p + 32u + dataBytes == record.size()) break;  // [V-data] the chain closes exactly at EOF
+    p += dataBytes + 32u;
+  }
+  return true;
+}
+
+// Each segment payload is whole blocks: mono feeds decodeAdpcmBlocks directly; stereo pairs are per-channel block
+// runs ([V-data] §7.1: each channel decodes smooth on its own, measured mad/rms 0.03-0.06), emitted frame-
+// interleaved to match the engine's stereo PCM contract (§3). The stream is zero-padded to the segment grid; the
+// caller's samplesPerChannel bound trims it (measured: blocks * 64 >= samplesPerChannel on every sampled record).
+void decodeMulStream(const MulStream& stream, std::span<const std::byte> record,
+                     std::int16_t* outSamples) noexcept {
+  const std::size_t cap = static_cast<std::size_t>(stream.samplesPerChannel) * stream.channels;
+  std::size_t emitted = 0u;
+  std::array<std::int16_t, 2u * 64u> pair{};
+  for (const auto& [offset, bytes] : stream.segments) {
+    const std::span<const std::byte> payload(record.data() + offset, bytes);
+    if (stream.channels == 1u) {
+      const std::size_t blocks = bytes / 36u;
+      for (std::size_t b = 0u; b < blocks && emitted < cap; ++b) {
+        decodeAdpcmBlocks(payload.subspan(b * 36u, 36u), pair.data());
+        const std::size_t take = std::min<std::size_t>(64u, cap - emitted);
+        for (std::size_t i = 0u; i < take; ++i) outSamples[emitted++] = pair[i];
+      }
+    } else {
+      const std::size_t pairs = bytes / 72u;
+      for (std::size_t c = 0u; c < pairs && emitted < cap; ++c) {
+        decodeAdpcmBlocks(payload.subspan(c * 72u, 36u), pair.data());           // channel L: 64 samples
+        decodeAdpcmBlocks(payload.subspan(c * 72u + 36u, 36u), pair.data() + 64u);  // channel R
+        for (std::size_t i = 0u; i < 64u && emitted < cap; ++i) {
+          outSamples[emitted++] = pair[i];        // L frame
+          if (emitted < cap) outSamples[emitted++] = pair[64u + i];  // R frame
+        }
+      }
+    }
+  }
+}
 }  // namespace cdc
 }  // namespace oa

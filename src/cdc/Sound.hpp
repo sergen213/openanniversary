@@ -14,14 +14,13 @@
 // reference's quirk of skipping a block byte and its low nibble is reproduced
 // here and flagged as [S] rather than claimed [V-exe].
 //
-// The other payload family (the standalone .mul stream records) has no decoder
-// yet — its codec is still open (AUDIO.md §4/§5); this module decodes the
-// block path only.
+// The other payload family (the standalone .mul stream records, AUDIO.md §7.1 [V-data, 2026-10-24]) frames as a
+// 0x800-byte head region plus self-describing segment records; frameMulStream below gates and decodes them.
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <span>
+#include <vector>
 
 namespace oa {
 namespace cdc {
@@ -62,6 +61,39 @@ inline std::array<std::uint8_t, 36> makeAdpcmBlock(std::int16_t seed, std::uint8
     block[5] = fifth;
     return block;
 }
+// One standalone .mul stream record (AUDIO.md §7.1 [V-data, 2026-10-24], measured on 39/39 named pc-w\sndstrm\*.mul
+// records from the vo/event_triggered/stingers/music/ui groups, sizes 5 KiB..17.5 MiB): a head region
+// {u32 rate, i32 loopStartSamples(-1), u32 samplesPerChannel, u32 channels(1|2)} (f32 volume/pan parameters at
+// +0x34/+0x38 and +0x68), then 0x800 bytes of mostly-zero head table. From 0x800 sits a chain of segment records,
+// each 32 bytes {u32 0, u32 dataBytes+16, u32 0, u32 0, u32 dataBytes, u32 0, u32 0, u32 0} immediately followed by
+// that many payload bytes = WHOLE §3 blocks: mono records carry 36-byte blocks (measured runs 720/864 bytes =
+// 20/24 blocks), stereo records carry per-channel block pairs [L block][R block] = 72 bytes (1440/1728 = 20/24
+// pairs). The chain is self-describing — next record = record + dataBytes + 32 — and the last segment's payload ends
+// exactly at end of file. Total blocks x 64 >= samplesPerChannel: short streams are zero-padded to the segment grid,
+// so the decode trims to samplesPerChannel (measured [V-data]: every sampled record satisfies that bound). The gate
+// refuses anything whose chain does not close at EOF with whole-block payloads; the CINE voice-bag variant (§7.1) is
+// refused by construction ('CINE' magic at +0x810).
+struct MulStream {
+    std::uint32_t rate = 0;
+    std::int32_t loopStartSamples = -1;
+    std::uint32_t samplesPerChannel = 0;   // the +0x08 field, trimmed by decodeMulStream
+    std::uint32_t channels = 1;            // measured values: 1 or 2
+    std::vector<std::pair<std::size_t, std::size_t>> segments{};  // {payload offset, payload bytes} in file order
+};
+
+// Frames a standalone .mul record's payload (the archive record's stored bytes verbatim). Strict: every segment
+// header word must be zero except the size pair, sizes must be whole multiples of 36*channels, and the chain must
+// end exactly at EOF. [V-data] on the install all 39 sampled standard records pass this gate with 873,808/873,808
+// blocks sane under §3's structural test; decoding their streams yields audio (measured mean|delta|/RMS 0.03-0.09,
+// zero-crossing rate 0.016-0.034 at 32-44.1 kHz — white noise measures ~1.0 and ~0.45).
+bool frameMulStream(std::span<const std::byte> record, MulStream* out) noexcept;
+
+// Decodes every segment of a framed .mul stream into PCM: mono = §3 blocks straight through; stereo = per-channel
+// block pairs de-interleaved to frame-interleaved L,R output (measured [V-data]: each channel's block run decodes
+// smooth on its own, mad/rms 0.03-0.06). outSamples must hold samplesPerChannel * channels samples; the tail past
+// that bound is padding and dropped.
+void decodeMulStream(const MulStream& stream, std::span<const std::byte> record,
+                     std::int16_t* outSamples) noexcept;
 
 }  // namespace cdc
 }  // namespace oa

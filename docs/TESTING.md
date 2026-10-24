@@ -235,4 +235,8 @@ were both caught by that set before any test ran. `clang-tidy` is not configured
   `lara.drm`'s section table so the test stays data-free.
 * No GPU-independent renderer test on software Vulkan (`lavapipe`) yet; add it when CI runs, because a driver-less runner
   otherwise skips the smoke step silently (exit 77).
-* No ASan/UBSan run over the *asset* path with real files; add one together with the DRM parser fuzz entry.
+* **ASan/UBSan over the real asset path ships as ci step 4/4** (2026-10-24): `scripts/ci.sh` runs the sanitizer build's
+  `oa-asset <install> list` (the bigfile index) and `namescan` (a full DRM v14 parse of every unit in the install) under
+  the same `-DOA_SANITIZE=ON` tree as the unit suite - measured green end to end on this machine (all four steps, 87/87
+  tests plus both self-checks and the sweep, no sanitizer findings). The step skips with a printed line when
+  `OA_GAME_DIR` is unset. A dedicated fuzz entry for the DRM parser remains open.

@@ -11,12 +11,12 @@ configure() { # configure <build-dir> <sanitizer: ON|OFF>
         -DOA_BUILD_TESTS=ON -DOA_SANITIZE="$2"
 }
 
-echo "== 1/3 unit tests (no sanitizers) =="
+echo "== 1/4 unit tests (no sanitizers) =="
 configure "$scratch/plain" OFF
 cmake --build "$scratch/plain"
 ctest --test-dir "$scratch/plain" --output-on-failure
 
-echo "== 2/3 renderer smoke =="
+echo "== 2/4 renderer smoke =="
 game_args=()
 # With a real install available, draw shipped geometry too: one level unit's unindexed vertex run plus its terrain strip
 # records reached through the oct-tree leaves (`--strips=true`, the level unit hash is documented in
@@ -85,10 +85,20 @@ if [[ -n "${OA_GAME_DIR:-}" ]]; then
         exit 1
     fi
 fi
-echo "== 3/3 unit tests under ASan+UBSan =="
+echo "== 3/4 unit tests under ASan+UBSan =="
 # Display path is excluded here on purpose: vendor code (SDL/driver) leaks by design and would mask real findings.
 configure "$scratch/san" ON
 cmake --build "$scratch/san"
 ctest --test-dir "$scratch/san" --output-on-failure
+
+echo "== 4/4 ASan+UBSan over the REAL asset path =="
+# TESTING.md §6's third bullet: the sanitizer build of oa-asset walks every shipped record (`list` = the bigfile
+# index; `namescan` = a full DRM v14 parse of all 1,098 units). The step skips when no install is configured.
+if [[ -n "${OA_GAME_DIR:-}" ]]; then
+    "$scratch/san/oa-asset" "$OA_GAME_DIR" list >/dev/null
+    "$scratch/san/oa-asset" "$OA_GAME_DIR" namescan >/dev/null
+else
+    echo "skip: OA_GAME_DIR unset (the sanitizer asset sweep needs a real install)"
+fi
 
 echo "ci.sh: all steps passed"
