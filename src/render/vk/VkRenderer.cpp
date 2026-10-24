@@ -1780,6 +1780,15 @@ void VkRenderer::destroyMeshMaterials() {
     meshSetLayout_ = VK_NULL_HANDLE;
     if (meshSampler_ != VK_NULL_HANDLE) vkDestroySampler(device_, meshSampler_, nullptr);
     meshSampler_ = VK_NULL_HANDLE;
+    for (MeshMaterial& material : bodyMaterials_) {
+        if (material.image != VK_NULL_HANDLE) vkDestroyImage(device_, material.image, nullptr);
+        if (material.view != VK_NULL_HANDLE) vkDestroyImageView(device_, material.view, nullptr);
+        if (material.memory != VK_NULL_HANDLE) vkFreeMemory(device_, material.memory, nullptr);
+    }
+    bodyMaterials_.clear();
+    if (bodyPool_ != VK_NULL_HANDLE) vkDestroyDescriptorPool(device_, bodyPool_, nullptr);   // frees her sets too
+    bodyPool_ = VK_NULL_HANDLE;
+    bodyBatches_.clear();
     meshBatches_.clear();
 }
 
@@ -2227,6 +2236,48 @@ bool VkRenderer::uploadBody(const MeshUpload& mesh, std::string* error) {
     indexInfo.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
     indexInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     if (!createHostVisible(&indexInfo, &bodyIndexBuffer_, &bodyIndexMemory_, mesh.indices->data(), indexInfo.size)) return false;
+    // Her pages, bound like the terrain's (docs/formats/GEOMETRY.md §36): one sampled image plus descriptor set per
+    // material in her own pool. The sampler and set layout are the mesh pipeline's, which lives as long as she does
+    // on screen - drawBody runs inside that pipeline. No materials means the plain marker: white-bound single draw.
+    for (MeshMaterial& material : bodyMaterials_) {
+        if (material.image != VK_NULL_HANDLE) vkDestroyImage(device_, material.image, nullptr);
+        if (material.view != VK_NULL_HANDLE) vkDestroyImageView(device_, material.view, nullptr);
+        if (material.memory != VK_NULL_HANDLE) vkFreeMemory(device_, material.memory, nullptr);
+    }
+    bodyMaterials_.clear();
+    if (bodyPool_ != VK_NULL_HANDLE) vkDestroyDescriptorPool(device_, bodyPool_, nullptr);
+    bodyPool_ = VK_NULL_HANDLE;
+    bodyBatches_.clear();
+    if (!mesh.materials.empty()) {
+        const VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                                            static_cast<uint32_t>(mesh.materials.size() + 1u)};
+        VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        poolInfo.maxSets = static_cast<uint32_t>(mesh.materials.size() + 1u);   // headroom over the exact count, as uploadMesh learned
+        poolInfo.poolSizeCount = 1;
+        poolInfo.pPoolSizes = &poolSize;
+        if (!check(vkCreateDescriptorPool(device_, &poolInfo, nullptr, &bodyPool_), "body vkCreateDescriptorPool", error))
+            return false;
+        for (const TextureUpload& page : mesh.materials) {
+            MeshMaterial material;
+            if (!uploadSampledImage(page, &material.image, &material.memory, &material.view, error)) return false;
+            VkDescriptorSetAllocateInfo setAllocate{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+            setAllocate.descriptorPool = bodyPool_;
+            setAllocate.descriptorSetCount = 1;
+            setAllocate.pSetLayouts = &meshSetLayout_;
+            if (!check(vkAllocateDescriptorSets(device_, &setAllocate, &material.set), "body vkAllocateDescriptorSets", error))
+                return false;
+            const VkDescriptorImageInfo described{meshSampler_, material.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+            VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            write.dstSet = material.set;
+            write.dstBinding = 0;
+            write.descriptorCount = 1;
+            write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            write.pImageInfo = &described;
+            vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
+            bodyMaterials_.push_back(material);
+        }
+        bodyBatches_ = mesh.batches;   // runs over the index list just uploaded; kNoTexture binds white at draw time
+    }
     bodyVertexCount_ = mesh.vertexCount;
     bodyIndexCount_ = static_cast<std::uint32_t>(mesh.indices->size());
     if (error != nullptr) error->clear();
@@ -2252,8 +2303,17 @@ void VkRenderer::drawBody(VkCommandBuffer command) const {
     const VkDeviceSize bufferOffset = 0;
     vkCmdBindVertexBuffers(command, 0, 1, &bodyBuffer_, &bufferOffset);
     vkCmdBindIndexBuffer(command, bodyIndexBuffer_, 0, VK_INDEX_TYPE_UINT32);
-    vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, meshLayout_, 0, 1, &meshWhite_.set, 0, nullptr);
-    vkCmdDrawIndexed(command, bodyIndexCount_, 1, 0, 0, 0);
+    if (bodyBatches_.empty()) {
+        vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, meshLayout_, 0, 1, &meshWhite_.set, 0, nullptr);
+        vkCmdDrawIndexed(command, bodyIndexCount_, 1, 0, 0, 0);   // the plain marker: one white-bound run
+    } else {
+        for (const MeshBatch& batch : bodyBatches_) {
+            const VkDescriptorSet set = batch.material < static_cast<std::uint32_t>(bodyMaterials_.size())
+                                            ? bodyMaterials_[batch.material].set : meshWhite_.set;   // kNoTexture binds white
+            vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, meshLayout_, 0, 1, &set, 0, nullptr);
+            vkCmdDrawIndexed(command, batch.indexCount, 1, batch.indexStart, 0, 0);
+        }
+    }
     // Leave the command buffer exactly as it was found: rebind the terrain's vertex (and index) buffers so a later
     // draw from any call site can never read the 6-vertex marker buffer with mesh-length indices.
     vkCmdBindVertexBuffers(command, 0, 1, &meshBuffer_, &bufferOffset);

@@ -273,6 +273,12 @@ private:
     std::vector<MeshMaterial> meshMaterials_;
     MeshMaterial meshWhite_;
     std::vector<MeshBatch> meshBatches_;
+    // Her texture pages. Same set layout and sampler as the terrain's, but a pool of their own: uploadMesh
+    // destroys and rebuilds meshPool_ on every call, and a page bound to her must survive that (docs/formats/
+    // GEOMETRY.md §36). A batch whose material is kNoTexture binds the white 1x1, exactly as terrain §23 does.
+    VkDescriptorPool bodyPool_ = VK_NULL_HANDLE;
+    std::vector<MeshMaterial> bodyMaterials_;
+    std::vector<MeshBatch> bodyBatches_;
     mutable std::size_t meshDrawn_ = 0;    // §31's per-frame counts so a caller can report them without logging every frame
     mutable std::size_t meshCulled_ = 0;
     VkSampler meshSampler_ = VK_NULL_HANDLE;   // wrapped: terrain UVs tile past one page

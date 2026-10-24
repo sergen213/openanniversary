@@ -178,12 +178,19 @@ bool decodeModelMesh(std::span<const std::byte> payload, std::span<const std::by
         if (i == 0u || world.y > mesh.maxY) mesh.maxY = world.y;
     }
 
-    // Walk the linked strips [V-exe: rec = model+0x58; count i16 at +0 (0 terminates), indices u16 at +0x14, next at
-    // +0x10]. Every shipped lara `next` slot is a kind-0 relocation site: on disk it holds the addend of an absolute
-    // target in another section's base space, and the engine patches it at load (measured on /tmp/lara_unit.bin: all 20
-    // interior slots relocated; resolving them walks 21 strips / 23,967 indices, every index < the 6,679-vertex array).
-    // `stripNext` carries those resolved payload-relative targets; a negative value means the chain leaves this section.
+    // Walk the linked strips [V-exe: rec = model+0x58; count i16 at +0 (0 terminates), next u32 at +0x10]. Every
+    // shipped lara `next` slot is a kind-0 relocation site: on disk it holds the addend of an absolute target in
+    // another section's base space, and the engine patches it at load (measured on /tmp/lara_unit.bin: all 20 interior
+    // slots relocated; resolving them walks 21 strips). Two record shapes [V-data], §36: a signed dword at +8 is a
+    // self-offset to the strip's vertex block - `count` u16 (s,t) UV pairs, then the `count`-word index run into the
+    // model's global position array; the header word at +4 names the texture page by low byte (5..17 measured = type-5
+    // section ids 2..72 of this unit, terrain §21's plain-id namespace). A zero +8 is an inline untextured strip:
+    // indices straight at +0x14, no UV block - the engine binds white there (terrain §23), so those triangles join the
+    // flat `vertices`/`indices` run. Measured before this: reading +0x14 blindly on a textured strip reads its UV words
+    // AS indices - values under 6,679 sail through bounds checks, which is how every triangle looked plausible and
+    // nothing landed right.
     std::map<std::uint32_t, bool> visited;
+    std::map<std::uint32_t, std::size_t> runOfPage;   // page id -> index into mesh.runs, so same-page strips merge
     std::uint32_t rec = record.stripList;
     while (rec != 0u) {
         if (visited[rec]) return fail("strip list loops");
@@ -196,17 +203,55 @@ bool decodeModelMesh(std::span<const std::byte> payload, std::span<const std::by
             std::snprintf(buffer, sizeof(buffer), "strip at %u has a non-triangle count %d", rec, static_cast<int>(count));
             return fail(buffer);
         }
-        const std::size_t indexBytes = static_cast<std::size_t>(count) * 2u;
-        if (static_cast<std::size_t>(rec) + 0x14u + indexBytes > payload.size())
-            return fail("strip indices run past the payload end");
-        for (std::int16_t k = 0; k < count; ++k) {
-            const std::uint32_t index = loadU16(base + rec + 0x14u + static_cast<std::size_t>(k) * 2u);
-            if (index >= record.numVertices) {
+        const std::uint32_t pageId = loadU16(base + rec + 4u) & 0xFFu;   // §36: low byte names the page's id
+        const std::int32_t uvLink = static_cast<std::int32_t>(loadU32(base + rec + 8u));
+        if (uvLink == 0) {
+            const std::size_t indexBytes = static_cast<std::size_t>(count) * 2u;
+            if (static_cast<std::size_t>(rec) + 0x14u + indexBytes > payload.size())
+                return fail("strip indices run past the payload end");
+            for (std::int16_t k = 0; k < count; ++k) {
+                const std::uint32_t index = loadU16(base + rec + 0x14u + static_cast<std::size_t>(k) * 2u);
+                if (index >= record.numVertices) {
+                    char buffer[80];
+                    std::snprintf(buffer, sizeof(buffer), "strip at %u indexes vertex %u past the array", rec, index);
+                    return fail(buffer);
+                }
+                mesh.indices.push_back(index);
+            }
+        } else {
+            const std::int64_t block = static_cast<std::int64_t>(rec) + uvLink;   // measured gaps: 1,000..6,000 bytes back
+            if (block < 0 || static_cast<std::size_t>(block) + 4u * static_cast<std::size_t>(count) > payload.size()) {
                 char buffer[80];
-                std::snprintf(buffer, sizeof(buffer), "strip at %u indexes vertex %u past the array", rec, index);
+                std::snprintf(buffer, sizeof(buffer), "strip at %u names a vertex block at %lld outside the payload", rec,
+                              static_cast<long long>(block));
                 return fail(buffer);
             }
-            mesh.indices.push_back(index);
+            const std::size_t first = [&]() {
+                const auto known = runOfPage.find(pageId);
+                if (known != runOfPage.end()) return known->second;
+                mesh.runs.push_back(ModelRun{});
+                mesh.runs.back().pageId = pageId;
+                runOfPage[pageId] = mesh.runs.size() - 1u;
+                return mesh.runs.size() - 1u;
+            }();
+            ModelRun& run = mesh.runs[first];
+            const std::size_t slotBase = run.vertices.size();
+            const std::size_t indexBytes = static_cast<std::size_t>(count) * 2u;
+            if (static_cast<std::size_t>(rec) + 0x14u + indexBytes > payload.size())
+                return fail("strip indices run past the payload end");
+            for (std::int16_t k = 0; k < count; ++k) {
+                const std::uint32_t index = loadU16(base + rec + 0x14u + static_cast<std::size_t>(k) * 2u);   // §36: the run is at +0x14 for every strip shape; the block holds UVs only
+                if (index >= record.numVertices) {
+                    char buffer[80];
+                    std::snprintf(buffer, sizeof(buffer), "strip at %u indexes vertex %u past the array", rec, index);
+                    return fail(buffer);
+                }
+                MeshVertex vertex = mesh.vertices[index];   // position and shipped modulate ride the global array
+                vertex.texS = static_cast<std::int16_t>(loadU16(base + block + static_cast<std::size_t>(k) * 4u));
+                vertex.texT = static_cast<std::int16_t>(loadU16(base + block + static_cast<std::size_t>(k) * 4u + 2u));
+                run.vertices.push_back(vertex);
+                run.indices.push_back(static_cast<std::uint32_t>(slotBase + static_cast<std::size_t>(k)));
+            }
         }
         ++mesh.stripsWalked;   // counts strips that contributed triangles; a terminating count-0 record is not one
         const auto fixup = stripNext.find(rec + 0x10u);

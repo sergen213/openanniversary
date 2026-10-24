@@ -165,6 +165,39 @@ TEST(Model, decodesTheMiniModelThroughItsBindPoseAndStrips) {
     EXPECT_EQ(mesh.indices, want);
 }
 
+TEST(Model, decodesTexturedStripUvBlockAndPageId) {
+    // GEOMETRY.md §38: a signed +8 self-offset names the strip's UV block (count u16 s,t pairs at 1/4096), the page id
+    // is the low byte of +4, and the index run stays at +0x14. The mini-model's inline strips (+8 zero) must stay in
+    // the flat arrays; only this textured strip may produce a run - reading UV words as indices is what silently drew
+    // plausible garbage before §38.
+    auto bytes = miniModel();
+    bytes.resize(0x900, std::byte{0});
+    storeU32(bytes, 0x640u + 0x10u, 0x800u);                       // chain the textured strip after the second inline one
+    storeI16(bytes, 0x800u + 0, 3);                                // count
+    storeU16(bytes, 0x800u + 4, 5u);                               // page id 5 in the low byte
+    storeU32(bytes, 0x800u + 8, 0xFFFFFF80u);                      // -128: the block sits at 0x780
+    storeU16(bytes, 0x780u + 0, 4096u); storeU16(bytes, 0x780u + 2, 0u);       // corner 0 uv (1.0, 0)
+    storeU16(bytes, 0x780u + 4, 0u);     storeU16(bytes, 0x780u + 6, 4096u);   // corner 1 uv (0, 1.0)
+    storeU16(bytes, 0x780u + 8, 2048u);  storeU16(bytes, 0x780u + 10, 2048u);  // corner 2 uv (0.5, 0.5)
+    storeI16(bytes, 0x800u + 0x14, 0); storeI16(bytes, 0x800u + 0x16, 1); storeI16(bytes, 0x800u + 0x18, 0);
+    const auto colours = miniColours();
+    ModelMesh mesh;
+    std::string error;
+    const std::map<std::uint32_t, std::int64_t> noFixups;
+    ASSERT_TRUE(decodeModelMesh({bytes.data(), bytes.size()}, {colours.data(), colours.size()}, noFixups, &mesh, &error)) << error;
+    EXPECT_EQ(mesh.stripsWalked, 3u);
+    ASSERT_EQ(mesh.runs.size(), 1u);
+    EXPECT_EQ(mesh.runs[0].pageId, 5u);
+    ASSERT_EQ(mesh.runs[0].vertices.size(), 3u);
+    const std::vector<std::uint32_t> consecutive{0u, 1u, 2u};
+    EXPECT_EQ(mesh.runs[0].indices, consecutive);
+    EXPECT_EQ(mesh.runs[0].vertices[0].texS, 4096);   // corner UVs ride the stride-20 record's +12 shorts...
+    EXPECT_EQ(mesh.runs[0].vertices[1].texT, 4096);
+    EXPECT_EQ(mesh.runs[0].vertices[2].texS, 2048);
+    EXPECT_EQ(mesh.runs[0].vertices[0].x, mesh.vertices[0].x);   // ...and the position is the global array's record
+    EXPECT_EQ(mesh.indices.size(), 6u);                          // inline strips stay in the flat run untouched
+}
+
 TEST(Model, virtualSegmentsBlendTheirBonesPositions) {
     // The mini-model's virtual seg2 sits at (1-w)*P[0] + w*(P[1]+pivot): y = 0.5*0 + 0.5*(100-50) in model z -> world y 75?
     // P[0]=(0,0,100), P[1]=(0,10,100); pivot2=(0,0,-50): blend = (0, 5, 100+0.5*(-50)) = model z 75 -> world y 75.

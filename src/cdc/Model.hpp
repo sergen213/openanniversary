@@ -64,13 +64,25 @@ bool parseModelRecord(std::span<const std::byte> payload, ModelRecord* out, std:
 // section the colourList relocation names (pc-w\lara.drm section 28): pass payload[0x12c .. ] as a span, or empty to
 // bind the shipped default grey (0x80808080 [V-exe: null-pointer fallback in FUN_00409880]). The bind pose is OURS:
 // bone k sits at parent-chain pivot sums, virtual segments blend their two bones' positions; model +z maps to world +y.
-struct ModelMesh {
-    std::vector<MeshVertex> vertices;
-    std::vector<std::uint32_t> indices;
-    float height = 0.0f;          // world-unit vertical extent of the decoded body, for placement reports
-    float minY = 0.0f, maxY = 0.0f;
-    std::uint32_t stripsWalked = 0;
+// The strip records come in two shapes, measured on pc-w\lara.drm section 4 [V-data]: the header's signed dword at +8
+// is a self-offset to the strip's vertex block - UV pairs (u16 s,t per referenced vertex at 1/4096, the terrain scale)
+// followed by the u16 index run into the model's global position array. A zero +8 means an inline untextured strip:
+// indices straight at +0x14 with no UV block (the engine binds white for those, as terrain §23 does). The header word
+// at +4 packs a page key in its low byte: values 5..17 measured, and the unit's type-5 sections carry ids 2..72 -
+// the same id-names-pages namespace as terrain §21, with plain ids (no class prefix).
+struct ModelRun {
+    std::uint32_t pageId = 0;   // strip +4 low byte; 0 = untextured, bind white
+    std::vector<MeshVertex> vertices;   // one per index slot: position copied, texS/texT from the UV block
+    std::vector<std::uint32_t> indices; // consecutive into `vertices` (the index run is per-triangle-corner)
 };
+struct ModelMesh {
+     std::vector<MeshVertex> vertices;
+     std::vector<std::uint32_t> indices;
+    std::vector<ModelRun> runs;   // textured strips grouped by page id; `vertices`/`indices` carry the inline ones
+     float height = 0.0f;          // world-unit vertical extent of the decoded body, for placement reports
+     float minY = 0.0f, maxY = 0.0f;
+     std::uint32_t stripsWalked = 0;
+ };
 
 // Strip `next` slots (+0x10) in the shipped lara unit are kind-0 relocation sites: on disk they hold a section-base
 // addend, and the engine patches them to absolute runtime pointers at load. Pass the resolved chain from DrmFile's

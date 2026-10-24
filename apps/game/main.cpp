@@ -558,7 +558,7 @@ int main(int argc, char** argv) {
         // and level-change accounting. GEOMETRY.md §16 measured that some chains land far away because no vertex base has
         // been established for them, which is why the app keeps saying these heights measure the decode rather than shipped
         // ground.
-        const bool wantAvatar = config.flag("avatar", false);
+        const bool wantAvatar = config.flag("avatar", false) || autoScene;   // the boot scene runs the body too
         oa::cdc::TerrainQuery terrain;
         if (wantAvatar) {
             if (drawIndices.empty()) {
@@ -858,7 +858,7 @@ int main(int argc, char** argv) {
             // --avatarFollow=true moves the look-at to where the run ended, so --meshDump shows the level from her
             // vantage. It stays off by default because panning away from the mesh centre also moves the byte-exact
             // --selfCheck probe's framing (docs/TESTING.md), and that check must keep passing on the plain run.
-            if (config.flag("avatarFollow", false)) {
+            if (config.flag("avatarFollow", autoScene)) {   // the boot scene frames her, not the mesh centre
                 followBody = true;
                 followAt[0] = avatar.x;
                 followAt[1] = avatar.y;
@@ -925,7 +925,7 @@ int main(int argc, char** argv) {
 
             // --avatarDrive=true keeps the body after the scripted report and lets keys move it. It starts where the
             // scripted run finished, so what you see on screen is the same body the numbers describe.
-            if (config.flag("avatarDrive", false)) {
+            if (config.flag("avatarDrive", autoScene)) {   // plain boot hands the body to the keyboard
                 if (!alive) {
                     // The scripted straight-line run fell, but the census found a standing spot — start there
                     // instead of refusing, so a keyboard session still has a body on the level.
@@ -935,6 +935,17 @@ int main(int argc, char** argv) {
                         alive = true;
                         OA_LOG(oa::LogLevel::Info, "app", "--avatarDrive starts at the census spawn instead: the straight run fell");
                     }
+                }
+                // The boot scene starts her on the census' densest floor column, not where the scripted straight-line
+                // run ended: that line walks off the covered patch and finishes in mid-air, and a body dropped from
+                // 6,600 units spends its first second falling past the camera.
+                if (autoScene && alive) {
+                    oa::game::placeOnGround(&avatar, spawnX, spawnZ, spawn.y + 10.0f, 30.0f, 40.0f, terrain);
+                    // The follow camera latched the scripted run's endpoint before drive mode began; retarget it to
+                    // where she is actually placed, or every frame frames empty air 7,000 units from the body.
+                    followAt[0] = avatar.x;
+                    followAt[1] = avatar.y;
+                    followAt[2] = avatar.z;
                 }
                 if (alive) {
                     driveTerrain = std::move(terrain);
@@ -1017,14 +1028,21 @@ int main(int argc, char** argv) {
             std::array<std::byte, 6u * 20u> bodyBytes{};   // six stride-20 records (GEOMETRY.md §2)
             oa::cdc::ModelMesh laraMesh;   // filled when --lara decodes; its bytes then drive the body upload
             bool laraReady = false;
-            if (config.flag("lara", false)) {
+            // Her render data outlives the decode block below: texture pages point into laraImage's bytes, and the
+            // merged arrays are what uploadBody consumes after this scope closes.
+            std::vector<std::byte> laraImage;
+            std::vector<oa::cdc::MeshVertex> laraVerts;
+            std::vector<std::uint32_t> laraIdx;
+            std::vector<oa::render::TextureUpload> laraPages;
+            std::vector<oa::render::MeshBatch> laraBatches;
+            if (config.flag("lara", autoScene)) {   // the boot scene wears her shipped bind pose
                 // The shipped character record: pc-w\lara.drm section 4 is a 0x04c20453 model (GEOMETRY.md §36) - the
                 // bind-pose decode in src/cdc/Model.cpp turns it into stride-20 vertices the mesh pass already eats.
                 const auto laraRecord = archive.find("pc-w\\lara.drm");
                 if (!laraRecord) {
                     OA_LOG(oa::LogLevel::Warn, "app", "--lara: no pc-w\\lara.drm record; falling back to the marker");
                 } else {
-                    const std::vector<std::byte> laraImage = archive.read(*laraRecord, &error);
+                    laraImage = archive.read(*laraRecord, &error);   // the outer vector: its bytes back page uploads
                     oa::cdc::DrmFile laraDrm;
                     if (laraImage.empty() || !oa::cdc::DrmFile::parse(laraImage, &laraDrm, &error)) {
                         OA_LOG(oa::LogLevel::Warn, "app", "--lara: pc-w\\lara.drm is not a DRM unit: {}", error);
@@ -1062,10 +1080,72 @@ int main(int argc, char** argv) {
                         if (!oa::cdc::decodeModelMesh(modelPayload, colours, stripNext, &laraMesh, &modelError)) {
                             OA_LOG(oa::LogLevel::Warn, "app", "--lara decode failed: {}", modelError);
                         } else {
+                            // Merge everything into one vertex/index pair for uploadBody: the inline strips' global
+                            // front block first, then each textured run appended behind it - a corner's UV makes it a
+                            // copy of the position record, so its consecutive indices shift by the front's size. Page
+                            // ids resolve through this unit's type-5 section ids (GEOMETRY.md §36: plain ids, terrain
+                            // §21's namespace without the class prefix).
+                            laraVerts = laraMesh.vertices;
+                            laraIdx = laraMesh.indices;
+                            std::map<std::uint32_t, std::size_t> pageSlot;   // page id -> section index of this unit
+                            for (std::size_t s = 0; s < laraDrm.sections().size(); ++s) {
+                                const oa::cdc::DrmSection& sec = laraDrm.sections()[s];
+                                if (sec.stored && sec.type == 5) pageSlot[sec.id] = s;
+                            }
+                            std::map<std::uint32_t, std::uint32_t> materialOfSection;   // section -> laraPages slot, deduped
+                            // The inline strips ride the front indices and bind no page: give them their own batch,
+                            // because a non-empty batch list defines every draw uploadBody performs (terrain §23).
+                            oa::render::MeshBatch plain;   // material stays kNoTexture: white-bound, colours show alone
+                            plain.indexStart = 0u;
+                            plain.indexCount = static_cast<std::uint32_t>(laraIdx.size());   // the front block, before any run shifts it
+                            laraBatches.push_back(plain);
+                            for (const auto& run : laraMesh.runs) {
+                                oa::render::MeshBatch batch;
+                                batch.indexStart = static_cast<std::uint32_t>(laraIdx.size());
+                                const std::uint32_t vertexBase = static_cast<std::uint32_t>(laraVerts.size());
+                                laraVerts.insert(laraVerts.end(), run.vertices.begin(), run.vertices.end());
+                                for (const std::uint32_t index : run.indices) laraIdx.push_back(index + vertexBase);
+                                batch.indexCount = static_cast<std::uint32_t>(run.indices.size());
+                                const auto named = pageSlot.find(run.pageId);
+                                if (named == pageSlot.end()) {
+                                    OA_LOG(oa::LogLevel::Warn, "app", "--lara: a strip names page id {}, which matches no "
+                                                                       "stored type-5 section of the lara unit", run.pageId);
+                                } else {
+                                    const auto known = materialOfSection.find(static_cast<std::uint32_t>(named->second));
+                                    if (known == materialOfSection.end()) {
+                                        oa::cdc::Pcd9Info page;
+                                        std::string why;
+                                        const std::span<const std::byte> pageBytes = laraDrm.payload(laraDrm.sections()[named->second]);
+                                        if (oa::cdc::parsePcd9(pageBytes, &page, &why)) {
+                                            oa::render::TextureUpload upload;
+                                            upload.format = pcd9VkFormat(page);
+                                            if (upload.format == VK_FORMAT_UNDEFINED) {
+                                                OA_LOG(oa::LogLevel::Warn, "app", "--lara: page id {} has PCD9 tag {}, which has no Vulkan format", run.pageId, page.tag);
+                                            } else {
+                                                upload.width = page.width;
+                                                upload.height = page.height;
+                                                upload.mipLevels = page.mipLevels;
+                                                upload.bytes = pageBytes.data() + oa::cdc::kPcd9HeaderBytes;   // laraImage lives to the upload below
+                                                upload.byteSize = page.payloadBytes;
+                                                for (const oa::cdc::Pcd9LevelRegion& region : oa::cdc::pcd9LevelRegions(page)) {
+                                                    upload.levels.push_back(oa::render::TextureUpload::Level{region.offset, region.bytes});
+                                                }
+                                                materialOfSection[static_cast<std::uint32_t>(named->second)] = static_cast<std::uint32_t>(laraPages.size());
+                                                laraPages.push_back(std::move(upload));
+                                            }
+                                        } else {
+                                            OA_LOG(oa::LogLevel::Warn, "app", "--lara: page id {} resolves to section {}, which is not a decodable PCD9: {}", run.pageId, named->second, why);
+                                        }
+                                    }
+                                    const auto now = materialOfSection.find(static_cast<std::uint32_t>(named->second));
+                                    if (now != materialOfSection.end()) batch.material = now->second;
+                                }
+                                laraBatches.push_back(batch);   // an unresolved page binds white: colours alone, terrain §23
+                            }
                             laraReady = true;
                             OA_LOG(oa::LogLevel::Info, "app",
-                                   "--lara decoded {} vertices, {} indices over {} strips; body spans y {:.0f}..{:.0f}",
-                                   laraMesh.vertices.size(), laraMesh.indices.size(), laraMesh.stripsWalked,
+                                   "--lara decoded {} corners over {} strips ({} batch(es), {} PCD9 page(s) bound); body spans y {:.0f}..{:.0f}",
+                                   laraVerts.size(), laraMesh.stripsWalked, laraBatches.size(), laraPages.size(),
                                    laraMesh.minY, laraMesh.maxY);
                         }
                     }
@@ -1088,9 +1168,11 @@ int main(int argc, char** argv) {
             const std::vector<std::uint32_t> bodyIndices{0u, 2u, 4u, 0u, 4u, 3u, 0u, 3u, 5u, 0u, 5u, 2u,
                                                          1u, 4u, 2u, 1u, 3u, 4u, 1u, 5u, 3u, 1u, 2u, 5u};
             if (laraReady) {
-                body.bytes = laraMesh.vertices.data();
-                body.vertexCount = static_cast<std::uint32_t>(laraMesh.vertices.size());
-                body.indices = &laraMesh.indices;
+                body.bytes = laraVerts.data();
+                body.vertexCount = static_cast<std::uint32_t>(laraVerts.size());
+                body.indices = &laraIdx;
+                body.materials = laraPages;   // her PCD9 pages, bound per batch (GEOMETRY.md §36)
+                body.batches = laraBatches;
                 if (!renderer.uploadBody(body, &error)) {
                     OA_LOG(oa::LogLevel::Warn, "app", "no Lara on screen: {}", error);
                     error.clear();

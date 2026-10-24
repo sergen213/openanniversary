@@ -1035,3 +1035,25 @@ plus vertex transforms `FUN_00409140`/`FUN_00409540`; every offset re-verified o
   the dump measures 14,950 magenta pixels for a debug-tinted probe (production colours in lara7.bmp). The day-one
   `vkCreateInstance` validation-layer array also died at its scope's closing brace before the call - dangling UB,
   now function-scope static.
+
+## 38. Model strips carry per-corner UVs in a block named by the signed +8 word; page ids bind PCD9 pages **[V-data] [V-gpu]**
+
+Measured on pc-w\lara.drm section 4 (2026-10-24), replacing §37's assumption that every strip is header+indices:
+
+* Strip header (+0 count i16, +0x10 next u32) has two more fields: the **u16 at +4** packs a page key whose low byte
+  names a texture page (values 5..17 measured; this unit's type-5 sections carry plain ids 2..72 — terrain §21's id
+  namespace with no class prefix), and the **signed dword at +8** is a self-offset to the strip's vertex block.
+* Textured strips (`+8 != 0`, gaps measured −1,000..−6,000 bytes): `count` u16 (s,t) pairs at that block, same 1/4096
+  scale as terrain §2. Corner k of the strip's index run takes pair k. The **index run stays at +0x14 for every strip
+  shape** — reading it blindly on a textured strip reads UV words AS indices (values under 6,679 sail through bounds
+  checks: that is how §37's decode drew plausible silhouettes with wrong triangles). 9 of 21 strips are textured,
+  2,994 corners total.
+* Inline strips (`+8 == 0`) have no block: their footprint is exactly header + index run (measured: the next strip's
+  header follows immediately), so they carry no UVs and draw colour-only — matching the software path writing lit
+  grey modulates (`pfVar14[-2]` into `0x808080` bases, FUN_00409880) [V-exe]. Section 6/10/23 models are all-inline.
+* A page id resolves through this unit's type-5 ids (like terrain §33): section 1 (id 5) decodes as a 512×512 DXT1
+  **costume atlas — boot sole, laces, belt buckle, backpack straps** [V-data: decoded via DDS wrapper]; id 10 is a
+  256×256 page. `oa-game --lara` now groups corners into 7 batches (white-bound inline run + 6 PCD9 pages); the boot
+  scene shows her face and costume textured over Croft Manor, docs/TESTING.md §4.
+* All 11 shipped vertex colours of section 28 are greys (top `0x80707070`) — the shipped look multiplies them by page
+  texels and scene lighting; drawing raw bytes leaves her dark, byte-exact to §2's "shipped bytes unmodified" rule.
