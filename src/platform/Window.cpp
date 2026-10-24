@@ -71,6 +71,10 @@ void Window::pumpEvents() {
                 break;
             case SDL_EVENT_KEY_DOWN:
                 if (event.key.scancode == SDL_SCANCODE_ESCAPE) closed_ = true;
+                // Save/load are hotkeys, not held state: record the press edge and let keyPressedOnce consume it.
+                // event.key.repeat is false only on the physical first down, so holding F5 writes one slot.
+                else if (event.key.scancode == SDL_SCANCODE_F5 && !event.key.repeat) savePressed_ = true;
+                else if (event.key.scancode == SDL_SCANCODE_F9 && !event.key.repeat) loadPressed_ = true;
                 break;
             default:
                 break;
@@ -89,6 +93,22 @@ bool Window::keyDown(Key key) const {
     const bool keyboard = states != nullptr && index >= 0 && index < static_cast<int>(std::size(kScancode)) &&
                           kScancode[index] < count && states[kScancode[index]];
     return keyboard || gamepadDown(key);
+}
+
+bool Window::keyPressedOnce(Key key) {
+    // Save/Load ride the press edges only: they are absent from keyDown's scancode table, and gamepadDown never
+    // maps them, so nothing else consumes or fakes these.
+    if (key == Key::Save) {
+        const bool pressed = savePressed_;
+        savePressed_ = false;
+        return pressed;
+    }
+    if (key == Key::Load) {
+        const bool pressed = loadPressed_;
+        loadPressed_ = false;
+        return pressed;
+    }
+    return false;
 }
 
 bool Window::enableGamepad(std::string* error) {

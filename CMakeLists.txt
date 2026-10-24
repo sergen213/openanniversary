@@ -52,7 +52,7 @@ target_include_directories(oa_cdc PUBLIC src)
 target_link_libraries(oa_cdc PUBLIC ZLIB::ZLIB)
 
 # Movement over decoded geometry (docs/ROADMAP.md Milestone 5): no window, no archive, so it tests on synthetic meshes.
-add_library(oa_gameplay STATIC src/game/Avatar.cpp)
+add_library(oa_gameplay STATIC src/game/Avatar.cpp src/game/SaveGame.cpp)
 target_include_directories(oa_gameplay PUBLIC src)
 target_link_libraries(oa_gameplay PUBLIC oa_cdc)
 
@@ -80,7 +80,7 @@ if(OA_BUILD_TESTS)
   find_package(GTest REQUIRED)
   add_executable(oa_tests tests/test_bigfile.cpp tests/test_core.cpp tests/test_drm.cpp tests/test_geometry.cpp
                        tests/test_meshcamera.cpp tests/test_texture.cpp tests/test_terrain_query.cpp
-                       tests/test_sound.cpp tests/test_avatar.cpp tests/test_model.cpp)
+                       tests/test_sound.cpp tests/test_avatar.cpp tests/test_model.cpp tests/test_savegame.cpp)
   target_link_libraries(oa_tests PRIVATE oa_cdc oa_gameplay oa_core Vulkan::Headers GTest::gtest_main)
   include(GoogleTest)
   gtest_discover_tests(oa_tests)

@@ -20,6 +20,7 @@ enum class Key {
     W, A, S, D,              // camera pan in the view plane, or the body's legs under --avatarDrive (apps/game/main.cpp)
     Q, E,                    // zoom out / in
     Jump, Run,               // space, left shift: the body's jump and run
+    Save, Load,              // F5/F9: write/read the driven body's slot (src/game/SaveGame.*)
 };
 
 class Window {
@@ -43,6 +44,9 @@ public:
     bool shouldClose() const { return closed_; }
     // Named keys so the app never learns SDL's scancode numbers. Anything not listed here stays unpolled.
     bool keyDown(Key key) const;
+    // One-shot presses, collected in pumpEvents (auto-repeat ignored): the save/load hotkeys must fire exactly
+    // once per keypress, and holding F5 must not rewrite the slot every frame. Only Save/Load answer true.
+    bool keyPressedOnce(Key key);
     bool gamepadDown(Key key) const;   // the pad half of keyDown, polled separately so tests can ask alone
 
     // Adopts the first connected gamepad and logs its identity once. While one is adopted, keyDown also
@@ -55,6 +59,8 @@ private:
     SDL_Window* window_ = nullptr;
     bool closed_ = false;
     int gamepad_ = 0;   // SDL's gamepad handle is an SDL_JoystickID; 0 means no pad adopted
+    bool savePressed_ = false;   // set by an F5 keydown edge in pumpEvents, consumed by keyPressedOnce
+    bool loadPressed_ = false;   // the F9 twin
 };
 
 }  // namespace oa::platform

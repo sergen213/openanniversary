@@ -6,6 +6,8 @@
 #include "cdc/Geometry.hpp"
 #include "cdc/Model.hpp"
 #include "cdc/TerrainQuery.hpp"
+#include "game/SaveGame.hpp"
+
 #include "game/Avatar.hpp"
 #include "cdc/Texture.hpp"
 #include "core/Config.hpp"
@@ -38,6 +40,20 @@ oa::LogLevel levelFromName(const std::string& name) {
     if (name == "warn") return oa::LogLevel::Warn;
     if (name == "error") return oa::LogLevel::Error;
     return oa::LogLevel::Info;
+}
+
+}  // namespace
+
+namespace {
+
+// One slot per install, under the XDG data dir (XDG_DATA_HOME, falling back to ~/.local/share - the directory
+// standard, not our invention). The file is plain text so a run can be inspected and hand-edited.
+std::filesystem::path appSaveSlotPath() {
+    const char* base = std::getenv("XDG_DATA_HOME");
+    std::filesystem::path root = (base != nullptr && *base != '\0')
+                                     ? std::filesystem::path(base)
+                                     : std::filesystem::path(std::getenv("HOME") ? std::getenv("HOME") : ".") / ".local" / "share";
+    return root / "openanniversary" / "save.txt";
 }
 
 }  // namespace
@@ -1509,6 +1525,50 @@ int main(int argc, char** argv) {
                 panTarget[0] = driven.x - viewCentre[0];
                 panTarget[1] = driven.y + 60.0f - viewCentre[1];
                 panTarget[2] = driven.z - viewCentre[2];
+
+                // F5 writes the driven body's slot, F9 reads it (src/game/SaveGame.*). One press = one write: the edge
+                // comes from Window::keyPressedOnce, so holding the key cannot rewrite the file every frame. The state is
+                // OURS - no shipped save format is evidenced in the data we have read - and restoring only places the body
+                // and re-frames the camera: level geometry reloads from disk as always, and a slot written on another
+                // level refuses so the body cannot be teleported into a mesh that is not loaded.
+                if (window.keyPressedOnce(oa::platform::Key::Save)) {
+                    const std::filesystem::path slot = appSaveSlotPath();   // XDG data dir, see the helper above
+                    oa::game::SaveState slot_state;
+                    slot_state.level = meshPath;
+                    slot_state.avatar = driven;
+                    slot_state.yaw = camera.yaw;
+                    slot_state.pitch = camera.pitch;
+                    slot_state.zoom = camera.zoom;
+                    std::string saveError;
+                    if (oa::game::saveToFile(slot, slot_state, &saveError)) {
+                        OA_LOG(oa::LogLevel::Info, "app", "saved the body at ({:.1f}, {:.1f}, {:.1f}) of '{}' to {}",
+                               driven.x, driven.y, driven.z, meshPath, slot.string());
+                    } else {
+                        OA_LOG(oa::LogLevel::Warn, "app", "save failed: {}", saveError);
+                    }
+                }
+                if (window.keyPressedOnce(oa::platform::Key::Load)) {
+                    const std::filesystem::path slot = appSaveSlotPath();
+                    oa::game::SaveState loaded;
+                    std::string loadError;
+                    if (!oa::game::loadFromFile(slot, &loaded, &loadError)) {
+                        OA_LOG(oa::LogLevel::Warn, "app", "load failed: {}", loadError);
+                    } else if (loaded.level != meshPath) {
+                        OA_LOG(oa::LogLevel::Warn, "app", "the slot names level '{}' but this run loaded '{}': refusing",
+                               loaded.level, meshPath);
+                    } else {
+                        driven = loaded.avatar;
+                        drivenAlive = true;   // a saved contact position is on the surface by construction of the probe
+                        camera.yaw = loaded.yaw;
+                        camera.pitch = loaded.pitch;
+                        camera.zoom = loaded.zoom;
+                        panTarget[0] = driven.x - viewCentre[0];
+                        panTarget[1] = driven.y + 60.0f - viewCentre[1];
+                        panTarget[2] = driven.z - viewCentre[2];
+                        OA_LOG(oa::LogLevel::Info, "app", "loaded the body at ({:.1f}, {:.1f}, {:.1f}) ground {:.1f} from {}",
+                               driven.x, driven.y, driven.z, driven.groundY, slot.string());
+                    }
+                }
                 renderer.setBodyFrame(std::array<float, 3>{driven.x, driven.y + bodyLift, driven.z});   // inert until uploadBody ran
             } else {
                 keys.forward = window.keyDown(oa::platform::Key::W);
