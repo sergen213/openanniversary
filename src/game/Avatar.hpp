@@ -7,21 +7,29 @@
 // the body walking *into* where a wall or riser stands - horizontal push-back needs the capsule sweep TerrainQuery.hpp puts
 // out of scope **[INFERENCE]**. Overhangs read as floor for now too.
 //
-// The tuning numbers are ours, not measured from `tra.exe`: at the scale GEOMETRY.md §13 implies (median triangle edge
-// 198 world units, i.e. roughly a centimetre per unit) a walk near 400 units/s and gravity near -2000 units/s^2 give a
-// human-looking stride. Replacing them with the shipped values is open work; nothing here claims they are original.
+// The tuning numbers are ours, not measured from `tra.exe`: a full-image IEEE-754 byte search of the exe (Ghidra scout,
+// RESEARCH.md "Shipped runtime constants") found ZERO encodings for gravity or jump magnitudes - vertical motion is
+// data-driven, read per-frame as stride-12 records from animation/motion data through `FUN_004e38c0`
+// (`return *(float *)(*(int *)(in_ECX + 0x14) + param_1 * 0xc)`), so the shipped values live in level/anim payloads, not
+// code. What IS proven from the exe: integration is `pos += vel*dt` with dt in seconds (so velocities are units/s,
+// `FUN_0043cf00` lines 42473-88; player entity at line 245392), and dt itself is real time clamped to [0.001, 4.0] s with a
+// nominal 30 Hz tick (`DAT_00838458`/`DAT_00838430 = 0x21`, `FUN_004534e0` lines 56272-90). At GEOMETRY.md §13's scale
+// (median triangle edge ~198 units, roughly a centimetre per unit) a walk near 400 units/s and gravity near -2000 units/s^2
+// give a human-looking stride; nothing here claims the magnitudes are original.
 
 #include "cdc/TerrainQuery.hpp"
 
 namespace oa::game {
 
 struct AvatarTuning {
-    float walkSpeed = 400.0f;   // world units per second
-    float runSpeed = 750.0f;
-    float gravity = -2000.0f;   // world units per second squared
-    float jumpSpeed = 620.0f;   // instant vertical velocity on take-off
-    float maxStepUp = 25.0f;    // a foot may climb this far in one tick and still count as ground
-    float maxFallSpeed = -3000.0f;
+    float walkSpeed = 400.0f;   // world units per second [V-exe: unverified - the .rdata 400 at 0x652b9c is a camera offset]
+    float runSpeed = 750.0f;    // [V-exe: unverified - the u16 750 in the player defaults (FUN_0047f4a0 +0x1288) scales a
+                                // turn rate inside FUN_00482650, not locomotion]
+    float gravity = -2000.0f;   // world units per second squared [V-exe: absent from the image; anim-record driven]
+    float jumpSpeed = 620.0f;   // instant vertical velocity on take-off [V-exe: absent; animation records launch jumps]
+    float maxStepUp = 25.0f;    // a foot may climb this far in one tick and still count as ground; the shipped ground snap
+                                // gates by angle instead - pi/256 (0.703 deg) and 0.2454 rad tolerances [V-exe, FUN_00482510]
+    float maxFallSpeed = -3000.0f;  // [-3000.0 appears only as code immediates (16 sites), never as a data constant]
 };
 
 struct AvatarInput {

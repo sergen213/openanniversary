@@ -4,6 +4,7 @@
 #include "cdc/Bigfile.hpp"
 #include "cdc/Drm.hpp"
 #include "cdc/Geometry.hpp"
+#include "cdc/Model.hpp"
 #include "cdc/TerrainQuery.hpp"
 #include "game/Avatar.hpp"
 #include "cdc/Texture.hpp"
@@ -246,6 +247,7 @@ int main(int argc, char** argv) {
     // same reason the camera does, and driveTerrain is moved out of the scripted run below once that has reported.
     oa::cdc::TerrainQuery driveTerrain;
     oa::game::AvatarState driven;
+    float bodyLift = 85.0f;   // octahedron centre height; --lara replaces it with -mesh.minY so feet meet ground
     bool driveAvatar = false;
     const oa::game::AvatarTuning driveTuning;   // the same defaults the scripted run reports
     bool drivenAlive = true;
@@ -1013,6 +1015,62 @@ int main(int argc, char** argv) {
             // the origin; `setBodyFrame` translates it to her every frame through its own push-constant matrix, so
             // it shares the terrain's depth test and convention exactly (docs/ROADMAP.md Milestone 5).
             std::array<std::byte, 6u * 20u> bodyBytes{};   // six stride-20 records (GEOMETRY.md §2)
+            oa::cdc::ModelMesh laraMesh;   // filled when --lara decodes; its bytes then drive the body upload
+            bool laraReady = false;
+            if (config.flag("lara", false)) {
+                // The shipped character record: pc-w\lara.drm section 4 is a 0x04c20453 model (GEOMETRY.md §36) - the
+                // bind-pose decode in src/cdc/Model.cpp turns it into stride-20 vertices the mesh pass already eats.
+                const auto laraRecord = archive.find("pc-w\\lara.drm");
+                if (!laraRecord) {
+                    OA_LOG(oa::LogLevel::Warn, "app", "--lara: no pc-w\\lara.drm record; falling back to the marker");
+                } else {
+                    const std::vector<std::byte> laraImage = archive.read(*laraRecord, &error);
+                    oa::cdc::DrmFile laraDrm;
+                    if (laraImage.empty() || !oa::cdc::DrmFile::parse(laraImage, &laraDrm, &error)) {
+                        OA_LOG(oa::LogLevel::Warn, "app", "--lara: pc-w\\lara.drm is not a DRM unit: {}", error);
+                        error.clear();
+                    } else if (laraDrm.sections().size() <= 28u) {
+                        OA_LOG(oa::LogLevel::Warn, "app", "--lara: lara unit has {} sections, need at least 29",
+                               laraDrm.sections().size());
+                    } else {
+                        const std::span<const std::byte> modelPayload = laraDrm.payload(laraDrm.sections()[4]);
+                        const std::span<const std::byte> colourSection = laraDrm.payload(laraDrm.sections()[28]);
+                        // The colourList relocation lands at section 28 offset 0x12c (GEOMETRY.md §36): one ARGB dword
+                        // per vertex, from there to the end of the section.
+                        const std::span<const std::byte> colours =
+                            colourSection.size() > 0x12cu
+                                ? std::span<const std::byte>(colourSection.data() + 0x12cu, colourSection.size() - 0x12cu)
+                                : std::span<const std::byte>{};
+                        // Resolve every kind-0 relocation of the model section to a payload-relative target: the strip
+                        // `next` slots are patched by the engine at load from these addends (GEOMETRY.md §36), so the
+                        // chain is only walkable through this table. Targets outside the section end our walk.
+                        const oa::cdc::DrmSection& modelSection = laraDrm.sections()[4];
+                        std::map<std::uint32_t, std::int64_t> stripNext;
+                        for (const oa::cdc::DrmReloc& reloc : laraDrm.relocations(modelSection)) {
+                            if (oa::cdc::relocKind(reloc) != 0u) continue;
+                            const std::uint32_t target = oa::cdc::relocSectionIndex(reloc);
+                            std::int64_t rel = -1;
+                            if (target < laraDrm.sections().size()) {
+                                rel = static_cast<std::int64_t>(laraDrm.sections()[target].payloadOffset) +
+                                      static_cast<std::int64_t>(laraDrm.relocAddend(modelSection, reloc)) -
+                                      static_cast<std::int64_t>(modelSection.payloadOffset);
+                                if (rel < 0 || rel >= static_cast<std::int64_t>(modelSection.size)) rel = -1;
+                            }
+                            stripNext[reloc.siteOffset] = rel;
+                        }
+                        std::string modelError;
+                        if (!oa::cdc::decodeModelMesh(modelPayload, colours, stripNext, &laraMesh, &modelError)) {
+                            OA_LOG(oa::LogLevel::Warn, "app", "--lara decode failed: {}", modelError);
+                        } else {
+                            laraReady = true;
+                            OA_LOG(oa::LogLevel::Info, "app",
+                                   "--lara decoded {} vertices, {} indices over {} strips; body spans y {:.0f}..{:.0f}",
+                                   laraMesh.vertices.size(), laraMesh.indices.size(), laraMesh.stripsWalked,
+                                   laraMesh.minY, laraMesh.maxY);
+                        }
+                    }
+                }
+            }
             const std::uint32_t kBodyColour = 0xFFFF00FFu;  // ABGR: opaque magenta, the loudest colour terrain lacks
             const int kBodyVerts[6][3] = {{0, 85, 0},   {0, -85, 0},   {40, 0, 0},
                                           {-40, 0, 0},  {0, 0, 40},    {0, 0, -40}};
@@ -1026,19 +1084,33 @@ int main(int argc, char** argv) {
                 std::memcpy(markerRecord + 6, &one, sizeof(one));
                 std::memcpy(markerRecord + 8, &kBodyColour, sizeof(kBodyColour));
             }
+            oa::render::MeshUpload body;
             const std::vector<std::uint32_t> bodyIndices{0u, 2u, 4u, 0u, 4u, 3u, 0u, 3u, 5u, 0u, 5u, 2u,
                                                          1u, 4u, 2u, 1u, 3u, 4u, 1u, 5u, 3u, 1u, 2u, 5u};
-            oa::render::MeshUpload body;
-            body.bytes = bodyBytes.data();
-            body.vertexCount = 6u;
-            body.indices = &bodyIndices;
-            if (!renderer.uploadBody(body, &error)) {
-                OA_LOG(oa::LogLevel::Warn, "app", "no debug body on screen: {}", error);
-                error.clear();   // the session still plays; only the marker is missing
+            if (laraReady) {
+                body.bytes = laraMesh.vertices.data();
+                body.vertexCount = static_cast<std::uint32_t>(laraMesh.vertices.size());
+                body.indices = &laraMesh.indices;
+                if (!renderer.uploadBody(body, &error)) {
+                    OA_LOG(oa::LogLevel::Warn, "app", "no Lara on screen: {}", error);
+                    error.clear();
+                } else {
+                    // Her bind pose's lowest vertex is the feet; drop that to the ground plane she stands on.
+                    bodyLift = -laraMesh.minY;
+                    renderer.setBodyFrame(std::array<float, 3>{driven.x, driven.y + bodyLift, driven.z});
+                }
             } else {
-                OA_LOG(oa::LogLevel::Info, "app", "debug body: a magenta octahedron marks where she stands; the "
-                                                 "character mesh is still open work.");
-                renderer.setBodyFrame(std::array<float, 3>{driven.x, driven.y + 85.0f, driven.z});
+                body.bytes = bodyBytes.data();
+                body.vertexCount = 6u;
+                body.indices = &bodyIndices;
+                if (!renderer.uploadBody(body, &error)) {
+                    OA_LOG(oa::LogLevel::Warn, "app", "no debug body on screen: {}", error);
+                    error.clear();   // the session still plays; only the marker is missing
+                } else {
+                    OA_LOG(oa::LogLevel::Info, "app", "debug body: a magenta octahedron marks where she stands; the "
+                                                     "character mesh is still open work.");
+                    renderer.setBodyFrame(std::array<float, 3>{driven.x, driven.y + bodyLift, driven.z});
+                }
             }
         }
         if (const std::string yaw = config.str("yaw"); !yaw.empty()) camera.yaw = std::strtof(yaw.c_str(), nullptr);
@@ -1355,7 +1427,7 @@ int main(int argc, char** argv) {
                 panTarget[0] = driven.x - viewCentre[0];
                 panTarget[1] = driven.y + 60.0f - viewCentre[1];
                 panTarget[2] = driven.z - viewCentre[2];
-                renderer.setBodyFrame(std::array<float, 3>{driven.x, driven.y + 85.0f, driven.z});   // inert until uploadBody ran
+                renderer.setBodyFrame(std::array<float, 3>{driven.x, driven.y + bodyLift, driven.z});   // inert until uploadBody ran
             } else {
                 keys.forward = window.keyDown(oa::platform::Key::W);
                 keys.back = window.keyDown(oa::platform::Key::S);

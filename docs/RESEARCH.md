@@ -207,3 +207,48 @@ guess at family 1: it is `src/cdc/Sound.*` implementing exactly §3's shape, wit
 standard and compared word-for-word against `tra.exe` at the two recorded addresses — the same "read the engine's own
 tables" discipline used for the strip rule (§17) and the material table (§19). Family-1 streams stay unresolved until
 §5.2's winmm `waveOutWrite` capture lands; nothing about them moves into code.
+
+## Shipped runtime constants (Ghidra RE of `tra.exe`, 2026-10-23)
+
+All claims `[V-exe]` = copied verbatim from the Ghidra decompilation (`openanniversary-work/ghidra/exports/decomp_all.c`)
+at the cited address; method was an exhaustive IEEE-754 byte search of the whole 8.78 MB image plus xref walking of every
+`.rdata` float pool. This is the reference layer Milestone 6 consumes; `src/game/Avatar.hpp` carries the per-field tags.
+
+**Timestep (`FUN_004534e0`).** dt is real seconds clamped to [0.001, 4.0]; frame averaging caps at 0.1 s. The tick mode
+(`DAT_00838484`, clamped 1..3) sets the accumulator step: mode 1 (default) = 33 ms => **30 Hz**, mode 2 = 50 ms, mode 3 =
+16.667 ms. A debug branch forces dt = 0.5 s. Time-scale multiplies dt (`DAT_00838458 * DAT_00838774`). Integration is
+`pos += vel*dt` with dt in seconds — `FUN_0043cf00`:
+`*(float *)(param_1 + 0x40) = *(float *)(param_1 + 0x40) + *(float *)(param_1 + 0x50) * DAT_00838458;` — so velocity fields
+are **units/s**. The physics-object integrator near `LAB_00442003` instead runs sub-stepped semi-implicit Euler without dt
+(`v += a; p += v`, looped `param_3` times) => those bodies carry units/tick at the nominal 1/30 s.
+
+**Gravity, jump, walk/run magnitudes: absent from the exe (strong negative).** Zero encodings of -2000/-1500/620/9.8/9.81
+anywhere in the image; no `v += g*dt` site exists. Vertical motion is **data-driven**: the player controller reads stride-12
+records from animation/motion data — `FUN_004e38c0`: `return (float10)*(float *)(*(int *)(in_ECX + 0x14) + param_1 * 0xc);`
+with indices 0..3, 0x10, 0x11 feeding movement/rotation in `FUN_00482650`. The shipped jump arc therefore lives in the anim
+records inside model units (e.g. lara.drm's type-0 payloads), which makes Milestone 6's model-loader the path to real jump
+physics — not more exe reading.
+
+**Player object defaults (`FUN_0047f4a0`, zeroes 0x4c8 dwords then seeds).** Byte offsets: +0x270/500/600 = 6.1934;
++0x5d4/+0x340 = 1800.0; 512.0 group at +0x2a4/2b4/2b8; +0x2ac = 384.0; +0x2b0 = 12000.0; +0x2d0 = 50.0; +0x5b0 = 200.0;
++0x630 = 8.0; +0x1270/+0x1274 = 3000.0/-170.0; +0x1280/+0x1284 = 1200.0/80.0; +0x1290 = 10.0; u16 pairs +0x1288/+0x128a =
+750/450, +0x128c/+0x128e = 600/15000; -743/-744 sentinels at +0x1294/+0x12a4. The u16 pairs feed the controller with dt
+(`FUN_00482650` lines 92243-66): `-((stick - _DAT_00650434) * _DAT_00650414 * (float)*(ushort *)(obj + 0x1288) *
+_DAT_0064fc50) * _DAT_0065358c` with deadzone **0.25**, scale **1.3333**, `_DAT_0065358c = pi`; the 600 slot becomes a slew
+limit `600 * (pi/5003) ~= 0.377 rad/s` **[INFERENCE: yaw/camera cap, not walk speed]**.
+
+**Fall-out floor.** Global constant `_DAT_00651c6c = 743.0`; `FUN_0043cf00`: `else if (_DAT_00651c6c <= *(float *)(param_1 +
+0x38)) { ... }`, and the per-player sentinel default is **-744.0** (+0x1294/+0x12a4, re-armed by `FUN_00482510`); the
+sentinel equality gates respawn (`if (*(int *)(iVar7 + 0x1294) == -0x3b860000)`). Shipped levels therefore carry their own
+death plane; our fixed 200-unit fall margin is a stand-in **[V-exe: semantics proven, per-level value not read]**.
+
+**Ground snap.** Angle gates, not height: `_DAT_0065360c = pi/256` (0.703°) in `FUN_00482650`, siblings pass 0.2454 rad and
+(0.1470 rad, 2.5) to `FUN_00490fa0/FUN_00491040`. Camera-follow dead-zone speed `_DAT_00651c74 = 40.0`. Climb is a physics
+proxy (`Climber Proxy` string user `FUN_00551d90`, solver constants 0.5/0.01), rope proxy string at 0x656638 — traversal
+attach is engine-solver behaviour, the open item for Milestone 5's climb acceptance.
+
+**Registry settings (Wine prefix `HKCU\Software\Crystal Dynamics\Tomb Raider: Anniversary`).** The shipped game persists
+Display Width/Height 1024x768, Widescreen 0, MusicVolume/SfxVolume/VoVolume 0x80, Hints 1, MouseSensitivity 10, and a full
+Graphics key (AdapterID 0, AntiAliasing 0, BestTextureFilter 0x100, EnableDepthOfField 1, UseShader30 1) — the popup at boot
+is the Eidos rendering-setup dialog re-validating on every Wine launch. Volumes and Hints are Milestone 6's audio/HUD
+defaults; our fixed FOV/aspect assumptions match Widescreen=0.

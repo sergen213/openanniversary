@@ -185,10 +185,11 @@ bool VkRenderer::createInstance(const RendererConfig& config, std::string* error
     std::vector<const char*> extensionNames;
     for (const std::string& name : extensions) extensionNames.push_back(name.c_str());
     info.ppEnabledExtensionNames = extensionNames.data();
+    // The array must outlive the vkCreateInstance call below, so it lives at function scope, not inside the `if`.
+    static const char* const kValidationLayer[] = {"VK_LAYER_KHRONOS_validation"};
     if (useValidation) {
-        const char* only[] = {"VK_LAYER_KHRONOS_validation"};
         info.enabledLayerCount = 1;
-        info.ppEnabledLayerNames = only;
+        info.ppEnabledLayerNames = kValidationLayer;
     }
     if (!check(vkCreateInstance(&info, nullptr, &instance_), "vkCreateInstance", error)) return false;
 
@@ -2167,10 +2168,11 @@ bool VkRenderer::uploadBody(const MeshUpload& mesh, std::string* error) {
         if (error != nullptr) *error = "renderer not initialised";
         return false;
     }
-    // A marker of its own: small, static vertices around the origin plus an index list. The per-frame motion is a
-    // push-constant translation (`setBodyFrame`), so no GPU memory changes between frames and no hazard barrier exists.
-    if (mesh.bytes == nullptr || mesh.vertexCount < 3u || mesh.vertexCount > 64u) {
-        if (error != nullptr) *error = "a body marker needs 3..64 vertices";
+    // The moving thing: static vertices around the origin plus an index list, sized from a debug marker up to a full
+    // shipped character mesh (lara decodes 6,679). The per-frame motion is a push-constant translation
+    // (`setBodyFrame`), so no GPU memory changes between frames and no hazard barrier exists.
+    if (mesh.bytes == nullptr || mesh.vertexCount < 3u) {
+        if (error != nullptr) *error = "the body needs at least 3 vertices";
         return false;
     }
     if (mesh.indices == nullptr || mesh.indices->empty() || mesh.indices->size() % 3u != 0u) {
@@ -2235,11 +2237,13 @@ bool VkRenderer::uploadBody(const MeshUpload& mesh, std::string* error) {
 
 void VkRenderer::drawBody(VkCommandBuffer command) const {
     if (bodyIndexCount_ == 0u || bodyBuffer_ == VK_NULL_HANDLE) return;
-    // The marker's vertices sit around the origin; this frame's matrix is the terrain's own with the body position
-    // folded into its translation column, so both draws share one convention and one depth test.
+    // The body's vertices sit around the origin; this frame's matrix is the terrain's own with the world position
+    // folded into its translation column, so both draws share one convention and one depth test. All FOUR rows take
+    // their M*t term - the fourth row is the projection's w line, and dropping it (rows 0..2 only) leaves her clip.w
+    // at the origin plane's value, pushing every vertex off screen: that was the marker-drew-nothing bug.
     const auto base = buildMeshMatrix();   // column-major: element(row, col) = index col * 4 + row
     std::array<float, 16> matrix = base;
-    for (int row = 0; row < 3; ++row) {
+    for (int row = 0; row < 4; ++row) {
         const float offset = base[0 * 4 + row] * bodyPosition_[0] + base[1 * 4 + row] * bodyPosition_[1] +
                              base[2 * 4 + row] * bodyPosition_[2];   // M * t, w = 0
         matrix[3 * 4 + row] += offset;

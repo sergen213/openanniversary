@@ -944,3 +944,94 @@ across spans are NOT comparable). What this says about coverage: most of that un
 blocks reached by -1 records inside chains/trees the walk does not reach yet (the §28 open clause), so chain reach —
 not base fitting — is now the only honest path to level-wide terrain. Do not re-add unconditional bases to "restore"
 spans; §26-§30's space-tiling under that rule was partly a placement coincidence.
+
+## 36. Character/skeletal model records: tag `0x04c20453`, measured headers (2026-10-23)
+
+The type-0 payloads of a model unit (pc-w\lara.drm, 1712 sections: type7=851, type2=450, type6=229, **type0=110**,
+type5=71 textures, type32=1) are NOT all terrain. Ghidra left the object/unit resource ctor unanalyzed; objdump of
+`tra.exe` 0x5db1d0..0x5dc000 recovers it [V-exe]:
+
+```
+5db221: mov    0x20(%esi),%edx          ; obj+0x20 = model pointer array base
+5db234: push   $0x658178                ; "FATAL ERROR: object '%s' is missing model '%d' (out of %d models)!"
+5db247: mov    (%eax),%eax              ; first dword of the record = version tag
+5db249: cmp    $0x4c20453,%eax          ; fatal on mismatch ("model version ... does not match")
+5db267: movswl 0x18(%esi),%edx          ; obj+0x18 (u16) = number of models in this object
+5db2b4: mov    0x58(%esi),%eax          ; obj+0x58 = u16 bone-index list, terminated by 0xFFFF,
+5db2d3: shr    $0xc,%ecx                ;   top 4 bits of each entry = run-length advance; count at obj+0x56
+```
+
+So a character unit carries `numModels` records, each starting with the dword **0x04c20453** (the engine's model version
+code). In lara.drm these are sections **idx 4 (171,108 B, 57 relocs)** and **idx 6 (92,020 B, 20 relocs)** [V-data]; other
+type-0 payloads start differently and are not models (idx 10 starts `PCD9` + version dword 0x15 - the generic cdc
+render-resource tag shared with textures, checked by the texture ctor at decomp line 357269; idx 23 starts 64 zero bytes).
+
+Header dwords as dumped (`od -A x -t x4 /tmp/lara_s4.bin`, `--section 4`/`6` via oa-asset):
+
+```
+s4: 04c20453 0000006d 00000072 000001a0 | 3b89f3e1 x3 3f800000 | 00001a17 00003e00 00000001 0000011c
+    00001f3d 00000000 00000000 43fe9501 | 487d2c04 00000000 00000000 00006988 | 00000118 00000114 0001df70
+s6: 04c20453 0000006d 0000005d 000000f0 | 3b858b15 x3 3f800000 | 000008ad 00003380 00000001 000005ec
+    00000c0a 0000be50 00000000 43fef66f | 487dedf1 00000000 00000000 000028b0 | 000005e8 000005e4 00011ea0
+```
+
+Fields (both records; readings from the Ghidra scout's §-table, re-verified byte-exact against these dumps):
++0x00 tag [V-exe]; +0x04 revision 109 both; +0x08 count 114/93 (bone/batch-ish, unproven); +0x0c header size 416/240 =
+first data offset; +0x10..+0x1c sphere centre (unit space) + radius 1.0 - read as four consecutive floats by
+`FUN_005db680`'s stride-0x70 loop [V-exe]; **+0x20 numVertices 6679/2221**; **+0x24 numIndices 15872/13184** (u16 stream
+length per prior art `PCRenderModel.cpp Create(m_pIndexData, data->numIndices)`); +0x28 modelType = 1 = kTypeSkinned
+(prior-art enum); +0x2c/+0x30 count/offset pair (284, 7997)/(1516, 3082) - batch table candidate; +0x34 block start
+0/48720; +0x3c scale float 509.16/509.925 (world units per unit-space radius); +0x40 ~2.6e5 scalar (role unproven);
++0x4c 27016/10416 block start; +0x50/+0x54 pair (280, 276)/(1512, 1508) - second = first-4 in both: u16 quad-index runs
+give 4n-4 bytes for 3n indices [INFERENCE]; +0x58 index-array candidate 122736/73376.
+
+Size arithmetic [V-data]: s4 payload 171,108 - header 416 = 170,692; u16 indices 31,744; remainder 138,948 / 6679 verts
+= **20.8 B/vertex** (stride-20 + 5,368-byte tail, or stride-16 + per-vertex skin record). Positions are NOT a plain
+contiguous float3 array: bounded-float scans over both payloads find no clean run; s4's longest u16 run with values <
+numVertices is 5,572 entries from payload offset 0x25092 - the index stream is chunked per batch (prior art
+`modelBatchOffset`/`primGroupOffset`). Section 6's stream size (13184 x 2) does not even fit contiguously after its +0x58
+field, so no contiguous-fit invariant exists. Skin weights: no separate array located; the shipped vertex shaders take a
+bone-matrix palette constant `vmoPalette` (+ `bendConstants`) matching prior-art kTypeVmo*/kTypeBend - quantised/palette
+vertex data [INFERENCE from shader constants + size arithmetic].
+
+`src/cdc/Model.{hpp,cpp}` parses the proven header (tag veto, offset-fit vetoes; deliberately NO contiguous index-stream
+fit veto - s6 measured overflows); `tests/test_model.cpp` pins both shipped headers byte-exact. Unproven (open): vertex
+stream format table, batch record layout at +0x2c/+0x30, per-vertex bone weights, animation records (candidates: the 450
+type-2 / 229 type-6 sections of lara.drm; strings `.eBTrackStream` 0x658249), PCD9-version-21 payload role (idx 10). The
+vertex-buffer builder sits in the unanalyzed region around 0x5db1d0..0x5dc000 - its field loads are the authoritative
+format table; a disassembly pass over it and its callees is the next step.
+
+## 37. The lara model decodes to renderable geometry: segment/vertex/strip layout, relocated strip chain **[V-exe] [V-data] [V-gpu]**
+
+The scout pass over the draw path closes §36's open table (objdump of `tra.exe`, software skin-and-draw `FUN_00409880`
+plus vertex transforms `FUN_00409140`/`FUN_00409540`; every offset re-verified on /tmp/lara_unit.bin [V-data]):
+
+* Header (tr7 legacy `Model`, NOT PCModelData): +0x04 numSegments 109/-; **+0x0c segmentList** 416/240 - the segment
+  array, stride **0x40**, records {pivot float3 @+0x00, parent i32 @+0x0c (-1 root), boneA u16 @+0x28, boneB u16 @+0x2a,
+  blend w float @+0x2c} with segments >= numSegments virtual (blend of two bones); +0x10..+0x18 **modelScale**
+  0.0042099 (the i16 position quantiser; the draw loop builds a diagonal scale matrix [V-exe]); +0x20 numVertices
+  6679/2221; **+0x24 vertexList** - stride **16**: {i16 x,y,z, u16 bone} per prior art `ModelVertex` (s4 spans payload
+  [0x3e00, 0x1dfe0) exactly at 6679 x 16); +0x28/+0x2c numNormals/normalList into section 28; +0x30 s4 reads 7997 =
+  the strips' face census (7,989 walked + 8); +0x3c/+0x40 maxRad/maxRad^2; **+0x4c colourList** - per-vertex ARGB
+  dwords, reached by a kind-0 relocation landing at section 28 offset **0x12c**, NOT payload-relative (the exe's null
+  fallback paints every vertex 0x80808080); +0x50/+0x54 pair (role unproven; the prior-art boneMirrorData names do
+  not fit); **+0x58 stripList** - linked triangle-list records: count i16 @+0, next u32 @+0x10, indices u16 @+0x14.
+* **The `next` slots are relocation sites [V-data]:** all 57 section-4 relocs are kind 0; every one of the chain's 20
+  interior +0x10 slots is among them, and a raw walk over unpatched bytes walks off the payload. Resolving slot ->
+  base(target)+addend - base(section) walks **21 strips / 23,967 indices**, every index < 6,679 (max 6,678; 6,669 of
+  the array referenced), and the chain's final patched target lands at the payload tail with no room for a header -
+  that advance is the chain end. §36's "index-array candidate" reading is superseded: it IS the strip head, and its
+  indices live in the linked records, not one contiguous stream (which is why §36's run scans found nothing).
+* `src/cdc/Model.cpp` decodes this to stride-20 MeshVertex + triangle indices through a bind pose WE construct (bone k
+  = parent-chain pivot sums; virtual segments blend; model +z -> world +y) [INFERENCE: our pose, shipped orientation
+  unproven]; `decodeModelMesh(..., stripNext, ...)` takes the resolved chain and terminates on targets leaving the
+  section. Tests pin both shipped headers byte-exact plus a scrambled-slot synthetic that only decodes through fixups.
+* `oa-game --lara=true` (with --avatarDrive) uploads her as the driven body: **6,679 vertices / 7,989 triangles** -
+  exactly numFaces-8 [V-data] - at human scale (y span 510 = maxRad), shipped modulate colours from section 28. The
+  offscreen dump measures her silhouette over the start-hall terrain (docs/TESTING.md §4).
+* Renderer bug found on the way [V-gpu]: `drawBody()` folded the body position into only matrix rows 0..2 of the
+  terrain push constant; the projection w row needs the same M*t term, so every body vertex divided by the origin
+  plane's w and left the screen - both marker and mesh drew ZERO pixels on both passes. With all four rows folded,
+  the dump measures 14,950 magenta pixels for a debug-tinted probe (production colours in lara7.bmp). The day-one
+  `vkCreateInstance` validation-layer array also died at its scope's closing brace before the call - dangling UB,
+  now function-scope static.
