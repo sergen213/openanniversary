@@ -148,6 +148,16 @@ Four independent checks, because "it drew something" is not evidence:
   report window at walk speed. Walking east off the covered patch drops her through a hole; the app then stops moving her with
   a Warn naming it, which is §16-§17's coverage limit rather than a physics failure. `--meshDump=<path>` writes an offscreen
   BMP from either vantage (`openanniversary-work/wmem/follow.png` shows the strip patch at her spawn).
+  The driven body is visible on screen: with `--avatarDrive=true` the app uploads a magenta octahedron (six stride-20
+  records, human scale per §13's cm-per-unit reading) through `VkRenderer::uploadBody()` and moves it each frame by
+  `setBodyFrame()` — its own push-constant matrix (`buildMeshMatrix()` pre-translated), so no GPU memory changes between
+  frames. Drive mode also reframes the camera to HER: a 60-degree perspective on `MeshCamera::frameRadius = 900` units
+  pitched -0.15 (at the level-framed orthographic fit the marker measured ~8 px in a live capture, and zoom cannot
+  enlarge a target-plane object there — scaleXY = distance/radius couples them; framing by radius is what sets apparent
+  size). Check: `body marker uploaded: 6 vertices, 8 triangles` + `debug body:` + `frameRadius 900` in the log with
+  validation VUID-clean, and a window capture of `--gameDir=<install>` boot (no --mesh) measures the magenta diamond
+  54x80 device px at screen centre. The draw order is load-bearing: `drawBody` binds its OWN vertex/index buffers, so
+  it must run BEFORE the terrain rebinds `meshBuffer_` — batches drawn on the 6-vertex marker buffer are undefined.
 * **Crossing a hole on that geometry** — `oa-game --gameDir="<install>" --mesh=8baf540e --strips=true --avatar=true
   --avatarTraversal=true --vk.validation=false --frames=1` asks whether one take-off clears a hole the shipped strips actually
   leave. It scans the census lattice along eight directions, probing every eighth of a cell: a candidate needs flat ground for a

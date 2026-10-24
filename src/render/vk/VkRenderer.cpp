@@ -1794,6 +1794,9 @@ void VkRenderer::destroyMeshPipeline() {
 
 void VkRenderer::drawMeshGeometry(VkCommandBuffer command) const {
     vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, meshPipeline_);
+    // The body first: it binds its OWN vertex/index buffers and pushes its own matrix, so the terrain binds below
+    // (pipeline unchanged) must come after it — a batch drawn on the 6-vertex marker buffer is undefined.
+    drawBody(command);   // no-op when uploadBody never ran
     const VkDeviceSize bufferOffset = 0;
     vkCmdBindVertexBuffers(command, 0, 1, &meshBuffer_, &bufferOffset);
     pushMeshMatrix(command);
@@ -2105,10 +2108,14 @@ std::array<float, 16> VkRenderer::buildMeshMatrix() const {
         // z_clip/w = aDepth + bDepth/u with aDepth + bDepth/nearPlane = 0 and aDepth + bDepth/farPlane = 1. The planes sit
         // outside the mesh at any zoom, so panning into geometry does not clip the subject away.
         const float fov = camera_.fovDegrees * 3.14159265358979323846f / 180.0f;
-        const float distance = meshRadius_ * camera_.zoom / std::tan(0.5f * fov);
-        const float nearPlane = std::max(1.0f, distance - 1.5f * meshRadius_);
-        const float farPlane = distance + 1.5f * meshRadius_;
-        const float scaleXY = distance / meshRadius_;   // the fitting sphere spans the frame at zoom 1
+        // A follow view frames a PLAYER, not the whole level: projected size at target-plane depth is y_view/radius,
+        // so framing by the mesh's own ~30k-unit radius pins a 170-unit body to ~9 px on screen (docs/TESTING.md §4).
+        // frameRadius shrinks that basis; with it unset every older perspective probe keeps its exact matrix.
+        const float frame = camera_.frameRadius > 0.0f ? camera_.frameRadius : meshRadius_;
+        const float distance = frame * camera_.zoom / std::tan(0.5f * fov);
+        const float nearPlane = std::max(1.0f, distance - 1.5f * frame);
+        const float farPlane = distance + 1.5f * frame;
+        const float scaleXY = distance / frame;   // the fitting sphere spans the frame at zoom 1
         const float aDepth = farPlane / (farPlane - nearPlane);
         const float bDepth = -nearPlane * farPlane / (farPlane - nearPlane);
         for (int column = 0; column < 3; ++column) {
@@ -2151,6 +2158,103 @@ void VkRenderer::pushMeshMatrix(VkCommandBuffer command) const {
     vkCmdPushConstants(command, meshLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(matrix), matrix.data());
 }
 
+void VkRenderer::setBodyFrame(const std::array<float, 3>& position) {
+    for (int axis = 0; axis < 3; ++axis) bodyPosition_[axis] = position[axis];
+}
+
+bool VkRenderer::uploadBody(const MeshUpload& mesh, std::string* error) {
+    if (device_ == VK_NULL_HANDLE) {
+        if (error != nullptr) *error = "renderer not initialised";
+        return false;
+    }
+    // A marker of its own: small, static vertices around the origin plus an index list. The per-frame motion is a
+    // push-constant translation (`setBodyFrame`), so no GPU memory changes between frames and no hazard barrier exists.
+    if (mesh.bytes == nullptr || mesh.vertexCount < 3u || mesh.vertexCount > 64u) {
+        if (error != nullptr) *error = "a body marker needs 3..64 vertices";
+        return false;
+    }
+    if (mesh.indices == nullptr || mesh.indices->empty() || mesh.indices->size() % 3u != 0u) {
+        if (error != nullptr) *error = "a body marker needs a triangle index list";
+        return false;
+    }
+    for (const std::uint32_t index : *mesh.indices) {
+        if (index >= mesh.vertexCount) {
+            if (error != nullptr) *error = "a body index falls outside the marker's vertices";
+            return false;
+        }
+    }
+    constexpr std::size_t kRecordBytes = 20;   // docs/formats/GEOMETRY.md §2
+    const std::size_t bytes = kRecordBytes * static_cast<std::size_t>(mesh.vertexCount);
+    if (bodyMemory_ != VK_NULL_HANDLE) vkFreeMemory(device_, bodyMemory_, nullptr);
+    if (bodyBuffer_ != VK_NULL_HANDLE) vkDestroyBuffer(device_, bodyBuffer_, nullptr);
+    bodyMemory_ = VK_NULL_HANDLE;
+    bodyBuffer_ = VK_NULL_HANDLE;
+    if (bodyIndexMemory_ != VK_NULL_HANDLE) vkFreeMemory(device_, bodyIndexMemory_, nullptr);
+    if (bodyIndexBuffer_ != VK_NULL_HANDLE) vkDestroyBuffer(device_, bodyIndexBuffer_, nullptr);
+    bodyIndexMemory_ = VK_NULL_HANDLE;
+    bodyIndexBuffer_ = VK_NULL_HANDLE;
+    bodyVertexCount_ = 0;
+    bodyIndexCount_ = 0;
+
+    const auto createHostVisible = [&](VkBufferCreateInfo* info, VkBuffer* buffer, VkDeviceMemory* memory,
+                                        const void* data, std::size_t size) {
+        if (!check(vkCreateBuffer(device_, info, nullptr, buffer), "body vkCreateBuffer", error)) return false;
+        VkMemoryRequirements requirements{};
+        vkGetBufferMemoryRequirements(device_, *buffer, &requirements);
+        const uint32_t typeIndex = findMemoryType(physical_, requirements.memoryTypeBits,
+                                                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                                  VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        VkMemoryAllocateInfo allocate{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        allocate.allocationSize = requirements.size;
+        allocate.memoryTypeIndex = typeIndex == 0xFFFFFFFFu ? 0u : typeIndex;
+        if (!check(vkAllocateMemory(device_, &allocate, nullptr, memory), "body vkAllocateMemory", error)) return false;
+        if (!check(vkBindBufferMemory(device_, *buffer, *memory, 0), "body vkBindBufferMemory", error)) return false;
+        void* mapped = nullptr;
+        if (!check(vkMapMemory(device_, *memory, 0, VK_WHOLE_SIZE, 0, &mapped), "body vkMapMemory", error)) return false;
+        std::memcpy(mapped, data, size);
+        vkUnmapMemory(device_, *memory);
+        return true;
+    };
+    VkBufferCreateInfo vertexInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    vertexInfo.size = bytes;
+    vertexInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    vertexInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (!createHostVisible(&vertexInfo, &bodyBuffer_, &bodyMemory_, mesh.bytes, bytes)) return false;
+    VkBufferCreateInfo indexInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    indexInfo.size = mesh.indices->size() * sizeof(std::uint32_t);
+    indexInfo.usage = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+    indexInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (!createHostVisible(&indexInfo, &bodyIndexBuffer_, &bodyIndexMemory_, mesh.indices->data(), indexInfo.size)) return false;
+    bodyVertexCount_ = mesh.vertexCount;
+    bodyIndexCount_ = static_cast<std::uint32_t>(mesh.indices->size());
+    if (error != nullptr) error->clear();
+    OA_LOG(LogLevel::Info, "vk", "body marker uploaded: {} vertices, {} triangles at ({:.0f}, {:.0f}, {:.0f})",
+           bodyVertexCount_, bodyIndexCount_ / 3u, mesh.boundsMin[0], mesh.boundsMin[1], mesh.boundsMin[2]);
+    return true;
+}
+
+void VkRenderer::drawBody(VkCommandBuffer command) const {
+    if (bodyIndexCount_ == 0u || bodyBuffer_ == VK_NULL_HANDLE) return;
+    // The marker's vertices sit around the origin; this frame's matrix is the terrain's own with the body position
+    // folded into its translation column, so both draws share one convention and one depth test.
+    const auto base = buildMeshMatrix();   // column-major: element(row, col) = index col * 4 + row
+    std::array<float, 16> matrix = base;
+    for (int row = 0; row < 3; ++row) {
+        const float offset = base[0 * 4 + row] * bodyPosition_[0] + base[1 * 4 + row] * bodyPosition_[1] +
+                             base[2 * 4 + row] * bodyPosition_[2];   // M * t, w = 0
+        matrix[3 * 4 + row] += offset;
+    }
+    vkCmdPushConstants(command, meshLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(matrix), matrix.data());
+    const VkDeviceSize bufferOffset = 0;
+    vkCmdBindVertexBuffers(command, 0, 1, &bodyBuffer_, &bufferOffset);
+    vkCmdBindIndexBuffer(command, bodyIndexBuffer_, 0, VK_INDEX_TYPE_UINT32);
+    vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, meshLayout_, 0, 1, &meshWhite_.set, 0, nullptr);
+    vkCmdDrawIndexed(command, bodyIndexCount_, 1, 0, 0, 0);
+    // Leave the command buffer exactly as it was found: rebind the terrain's vertex (and index) buffers so a later
+    // draw from any call site can never read the 6-vertex marker buffer with mesh-length indices.
+    vkCmdBindVertexBuffers(command, 0, 1, &meshBuffer_, &bufferOffset);
+    if (meshIndexCount_ != 0u) vkCmdBindIndexBuffer(command, meshIndexBuffer_, 0, VK_INDEX_TYPE_UINT32);
+}
 bool VkRenderer::renderMeshOffscreen(std::vector<std::byte>* outRgba, uint32_t size, std::string* error) {
     if (device_ == VK_NULL_HANDLE || meshVertexCount_ == 0) {
         if (error != nullptr) *error = "renderMeshOffscreen needs an initialised renderer and an uploaded mesh";
@@ -2217,6 +2321,16 @@ void VkRenderer::shutdown() {
     meshIndexMemory_ = VK_NULL_HANDLE;
     meshIndexBuffer_ = VK_NULL_HANDLE;
     meshIndexCount_ = 0;
+    if (bodyMemory_ != VK_NULL_HANDLE && device_ != VK_NULL_HANDLE) vkFreeMemory(device_, bodyMemory_, nullptr);
+    if (bodyBuffer_ != VK_NULL_HANDLE && device_ != VK_NULL_HANDLE) vkDestroyBuffer(device_, bodyBuffer_, nullptr);
+    bodyMemory_ = VK_NULL_HANDLE;
+    bodyBuffer_ = VK_NULL_HANDLE;
+    if (bodyIndexMemory_ != VK_NULL_HANDLE && device_ != VK_NULL_HANDLE) vkFreeMemory(device_, bodyIndexMemory_, nullptr);
+    if (bodyIndexBuffer_ != VK_NULL_HANDLE && device_ != VK_NULL_HANDLE) vkDestroyBuffer(device_, bodyIndexBuffer_, nullptr);
+    bodyIndexMemory_ = VK_NULL_HANDLE;
+    bodyIndexBuffer_ = VK_NULL_HANDLE;
+    bodyVertexCount_ = 0;
+    bodyIndexCount_ = 0;
     if (commandPool_ != VK_NULL_HANDLE && device_ != VK_NULL_HANDLE) {
         vkDestroyCommandPool(device_, commandPool_, nullptr);
         commandPool_ = VK_NULL_HANDLE;

@@ -28,10 +28,12 @@ bool Window::create(const WindowConfig& config, std::string* error) {
     int logicalW = 0, logicalH = 0, deviceW = 0, deviceH = 0;
     SDL_GetWindowSize(window_, &logicalW, &logicalH);
     SDL_GetWindowSizeInPixels(window_, &deviceW, &deviceH);
+    int windowX = 0, windowY = 0;   // where the compositor actually put us (Wayland ignores SDL_WINDOW_POSITION)
+    SDL_GetWindowPosition(window_, &windowX, &windowY);
     // The two sizes differ exactly when the compositor scales the window (HiDPI): the renderer works in
     // device pixels throughout, so a scaled display renders sharper rather than resampled.
-    OA_LOG(LogLevel::Info, "platform", "window '{}': logical {}x{}, device {}x{}, pixel density {}",
-           config.title, logicalW, logicalH, deviceW, deviceH, SDL_GetWindowPixelDensity(window_));
+    OA_LOG(LogLevel::Info, "platform", "window '{}': logical {}x{}, device {}x{} at ({},{}), pixel density {}",
+           config.title, logicalW, logicalH, deviceW, deviceH, windowX, windowY, SDL_GetWindowPixelDensity(window_));
     return true;
 }
 

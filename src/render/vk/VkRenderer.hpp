@@ -80,6 +80,10 @@ struct MeshCamera {
     float panY = 0.0f;
     float panZ = 0.0f;
     float fovDegrees = 0.0f;   // 0 keeps the orthographic fit
+    // A follow camera frames a PLAYER, not the whole level: at >0 the perspective branch places the eye and scales
+    // x/y by this radius instead of the mesh's own (docs/TESTING.md §4 measured the driven marker ~9 px tall when
+    // framed by a 30k-unit level radius). The orthographic probes never set it, so every dump stays byte-identical.
+    float frameRadius = 0.0f;
 };
 
 // The keys the mesh pass listens for, resolved to booleans by the app so this mapping needs no window.
@@ -145,6 +149,12 @@ public:
     bool uploadMesh(const MeshUpload& mesh, std::string* error = nullptr);
     bool hasMesh() const { return meshVertexCount_ != 0; }
     void setMeshCamera(const MeshCamera& camera) { camera_ = camera; }
+    // A debug body that follows the keyboard-driven avatar each frame (docs/ROADMAP.md Milestone 5's playable
+    // session): a small marker whose vertices stay put around the origin, drawn through the same mesh pipeline and
+    // depth as the terrain but with its OWN push-constant matrix - `buildMeshMatrix()` pre-translated to the body -
+    // so nothing mutates GPU memory between frames and every path without an uploaded body stays byte-identical.
+    bool uploadBody(const MeshUpload& mesh, std::string* error = nullptr);  // <= 64 vertices, needs indices
+    void setBodyFrame(const std::array<float, 3>& position);                  // world point the origin marker lands on
 
     // Draws the uploaded mesh into an offscreen RGBA8 image and copies it back, so a headless run (Xvfb, CI) can
     // assert that shipped vertex positions and colours really reach pixels. `size` is square in pixels.
@@ -193,6 +203,9 @@ private:
     // swapchain pass and the offscreen probe call it. With batches, one draw per material run, each with that
     // material's page bound (white when it names none).
     void drawMeshGeometry(VkCommandBuffer command) const;
+    // The moving thing the keyboard drives: bound to a white page so its shipped-style vertex colours read
+    // unmodified, moved only by its own push-constant matrix (see `bodyPosition_`).
+    void drawBody(VkCommandBuffer command) const;
 
     static VKAPI_ATTR VkBool32 VKAPI_CALL debugMessenger(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
                                                          VkDebugUtilsMessageTypeFlagsEXT type,
@@ -242,6 +255,13 @@ private:
     VkBuffer meshIndexBuffer_ = VK_NULL_HANDLE;
     VkDeviceMemory meshIndexMemory_ = VK_NULL_HANDLE;
     std::uint32_t meshIndexCount_ = 0;
+    VkBuffer bodyBuffer_ = VK_NULL_HANDLE;
+    VkDeviceMemory bodyMemory_ = VK_NULL_HANDLE;
+    VkBuffer bodyIndexBuffer_ = VK_NULL_HANDLE;
+    VkDeviceMemory bodyIndexMemory_ = VK_NULL_HANDLE;
+    std::uint32_t bodyVertexCount_ = 0;
+    std::uint32_t bodyIndexCount_ = 0;
+    float bodyPosition_[3] = {0.0f, 0.0f, 0.0f};   // rewritten by setBodyFrame between frames
     // The pages one upload asked for, in MeshUpload::materials order, each with its own descriptor set; plus
     // the white 1x1 bound whenever a batch names no page (docs/formats/GEOMETRY.md §23).
     struct MeshMaterial {

@@ -1006,6 +1006,41 @@ int main(int argc, char** argv) {
             OA_LOG(oa::LogLevel::Error, "app", "cannot upload the triangle run: {}", error);
             return 2;
         }
+        if (driveAvatar) {
+            // A playable session needs the moving thing on screen. No character mesh is recovered yet, so the body
+            // renders as a magenta octahedron at human scale - about 170 units tall and 80 across, which is what
+            // GEOMETRY.md §13's "roughly a centimetre per unit" reading implies for Lara. Its vertices stay around
+            // the origin; `setBodyFrame` translates it to her every frame through its own push-constant matrix, so
+            // it shares the terrain's depth test and convention exactly (docs/ROADMAP.md Milestone 5).
+            std::array<std::byte, 6u * 20u> bodyBytes{};   // six stride-20 records (GEOMETRY.md §2)
+            const std::uint32_t kBodyColour = 0xFFFF00FFu;  // ABGR: opaque magenta, the loudest colour terrain lacks
+            const int kBodyVerts[6][3] = {{0, 85, 0},   {0, -85, 0},   {40, 0, 0},
+                                          {-40, 0, 0},  {0, 0, 40},    {0, 0, -40}};
+            for (unsigned vertex = 0; vertex < 6u; ++vertex) {
+                std::byte* markerRecord = bodyBytes.data() + static_cast<std::size_t>(vertex) * 20u;
+                const std::int16_t pos[3] = {static_cast<std::int16_t>(kBodyVerts[vertex][0]),
+                                             static_cast<std::int16_t>(kBodyVerts[vertex][1]),
+                                             static_cast<std::int16_t>(kBodyVerts[vertex][2])};
+                std::memcpy(markerRecord + 0, pos, sizeof(pos));
+                const std::uint16_t one = 1u;   // §2's constant word, matched so the record reads like a shipped one
+                std::memcpy(markerRecord + 6, &one, sizeof(one));
+                std::memcpy(markerRecord + 8, &kBodyColour, sizeof(kBodyColour));
+            }
+            const std::vector<std::uint32_t> bodyIndices{0u, 2u, 4u, 0u, 4u, 3u, 0u, 3u, 5u, 0u, 5u, 2u,
+                                                         1u, 4u, 2u, 1u, 3u, 4u, 1u, 5u, 3u, 1u, 2u, 5u};
+            oa::render::MeshUpload body;
+            body.bytes = bodyBytes.data();
+            body.vertexCount = 6u;
+            body.indices = &bodyIndices;
+            if (!renderer.uploadBody(body, &error)) {
+                OA_LOG(oa::LogLevel::Warn, "app", "no debug body on screen: {}", error);
+                error.clear();   // the session still plays; only the marker is missing
+            } else {
+                OA_LOG(oa::LogLevel::Info, "app", "debug body: a magenta octahedron marks where she stands; the "
+                                                 "character mesh is still open work.");
+                renderer.setBodyFrame(std::array<float, 3>{driven.x, driven.y + 85.0f, driven.z});
+            }
+        }
         if (const std::string yaw = config.str("yaw"); !yaw.empty()) camera.yaw = std::strtof(yaw.c_str(), nullptr);
         if (const std::string pitch = config.str("pitch"); !pitch.empty()) {
             camera.pitch = std::strtof(pitch.c_str(), nullptr);
@@ -1014,6 +1049,18 @@ int main(int argc, char** argv) {
         // --fov=<degrees> switches the mesh pass to a perspective frustum; 0 keeps the orthographic fit that the
         // offscreen probe and the dumps depend on.
         if (const std::string fov = config.str("fov"); !fov.empty()) camera.fovDegrees = std::strtof(fov.c_str(), nullptr);
+        // A driven body needs a camera that frames HER, not the whole level. Framed by the mesh's own radius the
+        // marker measured ~8 px in a live capture, and zoom cannot enlarge a target-plane object in this projection
+        // (scaleXY = distance/radius couples them; docs/TESTING.md §4). With no explicit --fov, drive mode opens a
+        // 60-degree perspective on a 900-unit frame sphere (~5x her height: readable marker with terrain context),
+        // pitched slightly down — the default pitch looks UP 23 degrees and put her below an empty sky in that same
+        // capture. --fov/--zoom/explicit yaw-pitch still win; scripted probes, dumps and self-checks never set
+        // driveAvatar, so every deterministic path keeps its byte-identical framing.
+        if (driveAvatar) {
+            if (config.str("fov").empty() && camera.fovDegrees <= 0.0f) camera.fovDegrees = 60.0f;
+            if (camera.fovDegrees > 0.0f) camera.frameRadius = 900.0f;   // orthographic drive stays level-framed
+            if (config.str("pitch").empty()) camera.pitch = -0.15f;      // gentle downward third-person look
+        }
         camStep = 0.02f * std::max({frameMax[0] - frameMin[0], frameMax[1] - frameMin[1], frameMax[2] - frameMin[2]});
         // --panX/panY/panZ slide the look-at target in world units (keyboard WASD pans from here at runtime); a headless
         // run needs them so §31's cull counts can face one end of a level instead of framing all of it.
@@ -1022,8 +1069,9 @@ int main(int argc, char** argv) {
         if (const std::string v = config.str("panZ"); !v.empty()) panTarget[2] = camera.panZ = std::strtof(v.c_str(), nullptr);
         renderer.setMeshCamera(camera);
         OA_LOG(oa::LogLevel::Info, "app", "camera keys: arrows orbit, WASD slide the look-at target, Q/E dolly; "
-                                         "{} projection at yaw {:.2f} pitch {:.2f} zoom {:.2f}",
-               camera.fovDegrees > 0.0f ? "perspective" : "orthographic", camera.yaw, camera.pitch, camera.zoom);
+                                         "{} projection at yaw {:.2f} pitch {:.2f} zoom {:.2f} frameRadius {:.0f}",
+               camera.fovDegrees > 0.0f ? "perspective" : "orthographic", camera.yaw, camera.pitch, camera.zoom,
+               camera.frameRadius);
         OA_LOG(oa::LogLevel::Info, "app", "drawing section {} of '{}' (id {}, type {}): {} vertices, {} triangles, "
                                          "bounds {:.0f}x{:.0f}x{:.0f} world units",
                chosen, meshPath, geometry.id, static_cast<int>(geometry.type), vertices.size(), bounds.triangles,
@@ -1307,6 +1355,7 @@ int main(int argc, char** argv) {
                 panTarget[0] = driven.x - viewCentre[0];
                 panTarget[1] = driven.y + 60.0f - viewCentre[1];
                 panTarget[2] = driven.z - viewCentre[2];
+                renderer.setBodyFrame(std::array<float, 3>{driven.x, driven.y + 85.0f, driven.z});   // inert until uploadBody ran
             } else {
                 keys.forward = window.keyDown(oa::platform::Key::W);
                 keys.back = window.keyDown(oa::platform::Key::S);
