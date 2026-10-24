@@ -927,3 +927,20 @@ ruled out; stop re-testing them and read the resource-handle loader in `tra.exe`
 Reproduce the negatives: for each record of `./build/oa-asset "<install>" list`, run
 `./build/oa-asset "<install>" drm --hash <h> --mask <m>` and grep its section directory's id column; separately dump
 every record hash and compare exact plus both 16-bit halves.
+
+## 35. The material vertex base is a gated BaseVertexIndex addend, not an unconditional shift **[V-exe] [V-data]**
+
+§29's drawing pseudocode carries one test the port had been skipping: `iVar2 = (strip[4] == -1) ? *(matRec + 8) : 0`
+(FUN_0040bae0) — a strip record's dword at **+16** decides whether its material table's +8 vertex base is added at all.
+Records whose +16 reads anything else draw their index run UNMODIFIED, as absolute indices into the unit's single
+vertex buffer (`terrain + 0x50`, §29); only -1 records are block-relative. `decodeTerrainStripChains` now gates exactly
+that way (test `TerrainStrips.drawsAbsoluteIndicesWhenField16IsNotMinusOne`).
+
+Measured effect, same day: on the boot level `ma1` supported columns rose **1599 -> 1676 of 2,304** and the mesh y-spread
+tightened (bounds 8118x4153 -> 8118x2379), so base-shifted geometry landed where the shipped engine puts it. On
+`8baf540e` the walked chains' RAW indices top out at 16,337 (§15/§16) and their +16 words are mostly not -1, so with
+the gate honoured they draw the front block of section 0 (bounds collapse to 31091x5509; census grid rescales, ratios
+across spans are NOT comparable). What this says about coverage: most of that unit's array lives in per-material
+blocks reached by -1 records inside chains/trees the walk does not reach yet (the §28 open clause), so chain reach —
+not base fitting — is now the only honest path to level-wide terrain. Do not re-add unconditional bases to "restore"
+spans; §26-§30's space-tiling under that rule was partly a placement coincidence.

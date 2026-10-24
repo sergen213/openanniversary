@@ -218,12 +218,15 @@ TEST(TerrainOctree, refusesTreesItCannotTrust) {
 }
 
 // One terrain strip record (GEOMETRY.md §10): the header is 44 bytes with vertexCount at +0, matIdx at +20 and
-// nextTexture at +40; only those three are read here. The rest of the header stays zero because the decoder does not use it.
+// nextTexture at +40. The dword at +16 is written -1 because that is what DrawTerrainStrip tests for (§29 [V-exe]:
+// `iVar2 = (strip[4] == -1) ? *(matRec + 8) : 0`), i.e. the shipped base-relative form; pass field16Override to draw
+// a record whose indices are absolute.
 std::vector<std::byte> strip(std::uint32_t vertexCount, std::int32_t matIdx, std::uint32_t nextTexture,
-                             const std::vector<std::uint16_t>& indices) {
+                             const std::vector<std::uint16_t>& indices, std::int32_t field16Override = -1) {
     std::vector<std::byte> out;
     putU32(out, vertexCount);
-    for (int i = 0; i < 4; ++i) putU32(out, 0);              // +4 .. +16
+    for (int i = 0; i < 3; ++i) putU32(out, 0);              // +4 .. +12
+    putU32(out, static_cast<std::uint32_t>(field16Override));   // +16: -1 => material vertex base is added
     putU32(out, static_cast<std::uint32_t>(matIdx));         // +20
     for (int i = 0; i < 4; ++i) putU32(out, 0);              // +24 .. +36
     putU32(out, nextTexture);                                // +40
@@ -442,6 +445,22 @@ TEST(TerrainStrips, refusesARecordOutsideItsMaterialBlock) {
     EXPECT_EQ(refused.records, 0u);
     EXPECT_EQ(refused.badHeads, 1u);
     EXPECT_TRUE(refused.indices.empty());
+}
+
+TEST(TerrainStrips, drawsAbsoluteIndicesWhenField16IsNotMinusOne) {
+    // §29 [V-exe] gate: ONLY records whose dword at +16 reads -1 get the material's vertex base as a BaseVertexIndex
+    // addend; any other value means the record's indices are already absolute (FUN_0040bae0:
+    // `iVar2 = (strip[4] == -1) ? *(matRec + 8) : 0`). Measured on the boot level ma1, honouring this raised the
+    // supported-column census from 1599 to 1676 of 2304 by drawing those records at their true places.
+    const std::vector<std::byte> payload = join({strip(3, 1, 50u, {20, 21, 22}, /*field16=*/0),
+                                                 strip(3, 1, 0u, {0, 1, 2}, -1)});
+    const std::uint32_t heads[] = {0u};
+    const std::uint32_t bases[] = {0u, 8u};
+    TerrainStripChain walked;
+    std::string error;
+    ASSERT_TRUE(oa::cdc::decodeTerrainStripChains(payload, heads, 64u, &walked, &error, bases)) << error;
+    EXPECT_EQ(walked.records, 2u);
+    EXPECT_EQ(walked.indices, (std::vector<std::uint32_t>{20, 21, 22, 8, 9, 10}));   // absolute first, base-relative second
 }
 
 // A whole v14 unit image laid out the way tests/test_drm.cpp's buildImage does (DRM.md §2): 28-byte header, 20-byte section

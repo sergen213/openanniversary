@@ -102,10 +102,15 @@ bool decodeTerrainStripChains(std::span<const std::byte> payload, std::span<cons
     // What makes a *drawn* record real is structure: vertexCount a multiple of three within range, its index run inside
     // this payload, and every index naming a vertex of the array (§15 measured all 4,768 chain-walked records against
     // those tests).
-    const auto readHeader = [&](std::size_t at, std::uint32_t* count, std::int32_t* matIdx, std::uint32_t* next) {
+    const auto readHeader = [&](std::size_t at, std::uint32_t* count, std::int32_t* matIdx, std::uint32_t* next,
+                                std::int32_t* field16) {
         if (at + kHeaderBytes > payload.size()) return false;
         *count = loadU32(payload.data() + at);
         *matIdx = static_cast<std::int32_t>(loadU32(payload.data() + at + 20u));
+        // §29 [V-exe] DrawTerrainStrip/FUN_0040bae0: `iVar2 = (strip[4] == -1) ? *(matRec + 8) : 0` - the material's
+        // vertex base is a BaseVertexIndex addend ONLY for records whose dword at +16 reads -1; every other record's
+        // indices are already absolute into the unit's one vertex buffer (terrain + 0x50).
+        *field16 = static_cast<std::int32_t>(loadU32(payload.data() + at + 16u));
         *next = loadU32(payload.data() + at + 40u);
         return true;
     };
@@ -127,13 +132,14 @@ bool decodeTerrainStripChains(std::span<const std::byte> payload, std::span<cons
             std::uint32_t count = 0u;
             std::uint32_t next = 0u;
             std::int32_t matIdx = 0;
-            if (!readHeader(at, &count, &matIdx, &next)) {
+            std::int32_t field16 = 0;
+            if (!readHeader(at, &count, &matIdx, &next, &field16)) {
                 if (producedAny) out->brokenLinks += 1u; else out->badHeads += 1u;
                 break;
             }
             if (count == 0u) break;   // the end-of-chain marker prior art tests for
             std::uint32_t base = 0u;
-            if (!materialBase.empty()) {
+            if (!materialBase.empty() && field16 == -1) {
                 if (matIdx < 0 || static_cast<std::size_t>(matIdx) >= materialBase.size()) {
                     out->unknownMaterials += 1u;   // the table names no block for this record's material
                     break;
