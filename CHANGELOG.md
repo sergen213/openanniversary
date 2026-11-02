@@ -170,7 +170,7 @@ census verified against the shipped archive); 4–7 in progress. No game assets 
 
   ```sh
   ./build/oa-game --selfCheck=true --frames=600 \
-      --gameDir="/mnt/2nd4TB/TombRaiderAnniversary/Tomb Raider Anniversary"
+      --gameDir="<install dir>"
   # swapchain 1600x900 images=4 format=50 presentMode=2
   # self-check passed: 64x64 read-back matches the clear colour
   # presented 600 frame(s) on 'AMD Radeon RX 7900 XTX (RADV NAVI31)' in 3.799s (157.9 fps)

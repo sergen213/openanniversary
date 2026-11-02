@@ -64,7 +64,7 @@ Golden values **[V-data]** (also present in this archive):
 | `\trae\pc-w\objlist.dat` | `0x77D15B59` |
 
 The first two are byte-identical to the hashes recorded for the *Underworld* archive in the sister project
-([openunderworld `docs/formats/CONTAINERS.md`](../../../../1st4TB/Projects/openunderworld/docs/formats/CONTAINERS.md)),
+([openunderworld `docs/formats/CONTAINERS.md`](https://github.com/sergen213/openunderworld/blob/main/docs/formats/CONTAINERS.md)),
 so the unit path convention `pc-w\<name>.drm` is shared across the Legend-era family.
 
 ## 3. Sector and part addressing **[V-exe]** `FUN_0047dbd0`

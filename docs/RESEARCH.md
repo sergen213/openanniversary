@@ -40,14 +40,14 @@ measurements; external projects inform naming, structure and cross-version diffe
 
 ## 3. Sibling local reference (already audited)
 
-`openunderworld` (`/mnt/1st4TB/Projects/openunderworld`, GPLv3) documents DRM **v19** in `docs/formats/CONTAINERS.md` §4
+[`openunderworld`](https://github.com/sergen213/openunderworld) documents DRM **v19** in `docs/formats/CONTAINERS.md` §4
 with the same 20-byte section header we measured for v14, and records the TR7-vs-TR8 relocation-unit difference
 (`count×8` vs bytes), citing cdcEngineTools. Its Legend/Anniversary part alignment (`0x9600000`) was independently
 confirmed here (`docs/formats/CONTAINERS.md` §3). Full audit: `docs/EXISTING_PROJECT_AUDIT.md`.
 
 ### 3.1 Underworld install byte inventory **[V-data]**
 
-Reproduce: `python3` walk of `/mnt/1st4TB/Tomb Raider Underworld` (`os.walk`, sizes only, read-only). Measured 2026-10-20:
+Reproduce: `python3` walk of a *Tomb Raider: Underworld* install (`os.walk`, sizes only, read-only). Measured 2026-10-20:
 **37 files / 7.32 GiB**, top contributors: `bigfile.000` + `patch.000` = 2,065.9 MiB, `bigfile.001` 2,040.8 MiB,
 `bigfile.002` 2,046.9 MiB, `bigfile.003` 817.7 MiB, five `.bik` movies 505.8 MiB, four `.dll` 10.4 MiB, two `.exe`
 7.4 MiB, six `.rtf` manuals 3.3 MiB. Two engine-relevant differences from the Anniversary install visible straight from

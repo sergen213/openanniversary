@@ -12,7 +12,7 @@ scripts/ci.sh          # clean configure + build + unit tests + renderer smoke, 
 That script is the single source of truth; `.github/workflows/native.yml` runs the same steps on a runner. Local use:
 
 ```sh
-OA_GAME_DIR="/mnt/2nd4TB/TombRaiderAnniversary/Tomb Raider Anniversary" OA_SANITIZE=ON scripts/ci.sh
+OA_GAME_DIR="<your Tomb Raider Anniversary install>" OA_SANITIZE=ON scripts/ci.sh
 ```
 
 What it does, in order:
@@ -38,7 +38,7 @@ Runner-side behaviour (Ubuntu image plus `mesa-vulkan-drivers`/lavapipe) is *not
 
 ```sh
 cmake -S . -B build -G Ninja -DOA_BUILD_TESTS=ON && cmake --build build
-ctest --test-dir build --output-on-failure          # 68 tests, well under a second total
+ctest --test-dir build --output-on-failure          # 72 tests, well under a second total
 ```
 
 Fixture policy — the suite must pass with **no game data present**, so it is runnable in CI and on any machine:
@@ -61,7 +61,7 @@ that a helper was called; no test reads `/mnt/...`; nothing sleeps or waits on w
 These need the install and are therefore *not* part of CTest. They were run here and are recorded in `CHANGELOG.md`:
 
 ```sh
-G="/mnt/2nd4TB/TombRaiderAnniversary/Tomb Raider Anniversary"
+G="<your Tomb Raider Anniversary install>"
 ./build/oa-asset "$G" list | wc -l                                   # 4304 records across 27 parts
 ./build/oa-asset "$G" resolve /tmp/oapaths.txt | head                # name -> hash/size/part/specMask
 ./build/oa-asset "$G" extract --path 'pc-w\lara.drm' --out /tmp/oascan/lara.drm

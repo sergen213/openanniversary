@@ -12,7 +12,7 @@ changing anything toolchain-related.
 | RAM | ~30 GiB total; keep Ghidra headless runs serialised (one instance at a time) | `free -g` |
 | GPU | AMD Navi 31 [RX 7900 XT/XTX] `1002:744c`, driver `amdgpu`, Mesa/RADV | `lspci -nn`, `lsmod` |
 | Vulkan | loader 1.4.363, Mesa 26.2.4 (`vulkan-radeon`) | `vulkaninfo --summary`, `pacman -Qs vulkan` |
-| Repositories | game install + this repo on `/mnt/2nd4TB` (ext4, 3.7 T) | `df -h` |
+| Repositories | game install + this repo on a local ext4 data disk | `df -h` |
 
 Note: a stale `VK_LAYER_…lsfg-vk-layer.so` entry makes the loader print
 `Failed to find 'vkGetInstanceProcAddr' in layer "liblsfg-vk-layer.so"` on every Vulkan program start. The layer is
@@ -43,7 +43,7 @@ Warning set: `-Wall -Wextra -Wpedantic -Wshadow -Wconversion`. Debug builds get 
 
 ## Game install used for verification
 
-`/mnt/2nd4TB/TombRaiderAnniversary/Tomb Raider Anniversary`, 3.9 GB, GOG build:
+The GOG install (`Tomb Raider Anniversary/`), 3.9 GB:
 `tra.exe` sha256 `b43ade0d922b0f007747e5707b97c86404cbf4f051829e3711f7007a656ea53a`,
 `bigfile.000` … `bigfile.026`, plus `d3d9.dll`, `dxwrapper.dll`, `binkw32.dll`, `DEPHook.asi` (third-party wrappers,
 not part of the 2007 release and not used by this project).
@@ -57,7 +57,7 @@ The exe is 32-bit PE, so it runs only under Wine. Reproduce on this host [V-data
 
 ```sh
 # a copy keeps the purchased install pristine; the prefix and copy live in the private work dir
-cp -a "/mnt/2nd4TB/TombRaiderAnniversary/Tomb Raider Anniversary" ../openanniversary-work/wine-drive/trawork
+cp -a "<your install>/Tomb Raider Anniversary" ../openanniversary-work/wine-drive/trawork
 WINEPREFIX=$PWD/../openanniversary-work/wine-tra wineboot -u                       # 441 MB prefix
 D=~/.config/heroic/tools/dxvk/dxvk-3.1                                             # DXVK already on the machine
 cp $D/x32/*.dll ../openanniversary-work/wine-tra/drive_c/windows/syswow64/          # d3d8, d3d9, dxgi (32-bit)

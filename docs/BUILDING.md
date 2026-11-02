@@ -2,7 +2,7 @@
 
 This is the path a third party follows. It builds a native Linux renderer (SDL3 + Vulkan, no Wine/Proton at
 runtime) and runs it against **your own** legally obtained copy of *Tomb Raider: Anniversary* (the 2007 cdc/Legend
-GOG build). Nothing from the game ships in this repository — see `README.md` §Legal posture and `.gitignore`.
+GOG build). Nothing from the game ships in this repository — see [README.md](../README.md) ("You need the original game") and `.gitignore`.
 
 ## What you need
 
@@ -15,7 +15,7 @@ GOG build). Nothing from the game ships in this repository — see `README.md` �
 | GoogleTest | 1.18.0 | `find_package(GTest)` (apt/gtest or distro) |
 | SDL3 | CI pins `release-3.2.0`; the dev host has 3.4.18 — either works | build the pinned tag (below) or use your distro's `libSDL3` with a CMake config |
 | Vulkan loader + headers | loader 1.4.x, Mesa 26.x (or `mesa-vulkan-drivers`/lavapipe for a driver-less run) | `find_package(Vulkan)` — CMake's built-in lookup finds `libvulkan-dev`; the full Vulkan SDK is **not** required |
-| glslangValidator | compiles the four GLSL shaders to SPIR-V at build time (`find_program(... REQUIRED)`) | distro package (`glslang`) |
+| glslangValidator (optional) | compiles the four GLSL shaders to SPIR-V at build time (`find_program`); when absent, the prebuilt SPIR-V in `shaders/spirv/` is copied instead | distro package (`glslang`) |
 | A Vulkan-capable GPU | RX 7900 XTX (RADV) on the dev host; lavapipe software works for the smoke | driver stack (`vulkan-radeon`/`vulkan-intel`/`mesa-vulkan-drivers`) |
 
 You also need the game install itself (read-only). Point the tools at the directory holding `bigfile.000` … `bigfile.026`.
