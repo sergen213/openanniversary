@@ -13,7 +13,9 @@ gameplay are still ahead. See `CHANGELOG.md`, `docs/ARCHITECTURE.md` and `docs/R
 ## Legal posture
 
 * Everything in this repository is original work written from behavioural observation of the user's own copy
-  of the game, plus published format documentation. It is licensed under GPL-3.0-or-later (see `LICENSE`).
+  of the game, plus published format documentation. It is source-available, all rights reserved (see `LICENSE`);
+  contributions via pull request only (see `CONTRIBUTING.md`). Versions published before this change remain
+  under GPL-3.0-or-later.
 * Derived reverse-engineering material (decompilations, Ghidra projects, string dumps, extracted assets) lives
   outside the repository in a sibling `*-work/` directory and is git-ignored. Never commit it.
 * Asset loading reads the installed game files read-only. Nothing is written next to them; no DRM, no archive
