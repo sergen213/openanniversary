@@ -18,7 +18,7 @@ install)
         echo "backed up DXVK d3d9.dll to $bak"
     fi
     if [ ! -f "$bak/d3d9.dll.orig" ] && [ ! -f "$sys/d3d9_dxvk.dll" ]; then
-        echo "prefix has no DXVK d3d9.dll to take over; install it first (docs/ENVIRONMENT.md)" >&2
+        echo "prefix has no DXVK d3d9.dll to take over; install DXVK into the prefix first" >&2
         exit 1
     fi
     cp -a "$bak/d3d9.dll.orig" "$sys/d3d9_dxvk.dll"

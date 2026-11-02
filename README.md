@@ -89,14 +89,12 @@ build and running against your own install.
 - [docs/TESTING.md](docs/TESTING.md) — test pipeline and manual real-data checks.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — code structure and design.
 - [docs/ROADMAP.md](docs/ROADMAP.md) — milestones and their status.
-- [docs/ENVIRONMENT.md](docs/ENVIRONMENT.md) — the host and toolchain the project is developed against.
 - [docs/RESEARCH.md](docs/RESEARCH.md) — prior art and community documentation, with links.
 - [docs/formats/CONTAINERS.md](docs/formats/CONTAINERS.md) — cdc bigfile layout, path hashing, specialisation masks.
 - [docs/formats/DRM.md](docs/formats/DRM.md) — DRM unit format.
 - [docs/formats/TEXTURES.md](docs/formats/TEXTURES.md) — texture format.
 - [docs/formats/GEOMETRY.md](docs/formats/GEOMETRY.md) — geometry and terrain.
 - [docs/formats/AUDIO.md](docs/formats/AUDIO.md) — audio formats.
-- [docs/EXISTING_PROJECT_AUDIT.md](docs/EXISTING_PROJECT_AUDIT.md) — audit of related native-port projects.
 
 ## Contributing
 

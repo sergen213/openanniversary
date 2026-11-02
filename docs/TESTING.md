@@ -1,7 +1,7 @@
 # Testing
 
 Everything in this file is a command that has been executed on the development host, or is explicitly marked as not yet
-available. Goal rule: never claim something works without running a relevant test (`goal.txt` §"Verification").
+available. Rule: never claim something works without running a relevant test.
 
 ## 1. Canonical pipeline
 
@@ -102,7 +102,7 @@ Four independent checks, because "it drew something" is not evidence:
   swapchain pipeline into an offscreen attachment that is render-pass-compatible with it, and returns byte-for-byte within
   one unit. The attachment format must equal the pipeline's colour format; the probe also pins UV orientation, because
   row 0 of a payload has to come back as row 0 of the attachment.
-* **Presented pixels** — grab the desktop (`spectacle -b -n -o out.png`, see `docs/ENVIRONMENT.md` §"Display"), then
+* **Presented pixels** — grab the desktop (`spectacle -b -n -o out.png`), then
   *measure*: find the largest solid rectangle of the expected colour instead of a loose bounding box (other UI elements
   share the hue). For a 1600x900 window this measured exactly 1600x893 px at (1120, 649) — a few rows under the panel.
   Remember an sRGB attachment encodes clear values: linear `(0.10,0.35,0.62)` arrives as `#59A0CF`.
@@ -177,8 +177,8 @@ Four independent checks, because "it drew something" is not evidence:
   vertex the unit does not have, a link stepped forward only onto a real header (and one too far ending the chain), a cycle
   walked once, and a payload holding something else (`oa_tests --gtest_filter=TerrainStrips*`).
 
-Validation-layer runs must be clean apart from the host's stale `liblsfg-vk-layer.so` loader messages documented in
-`docs/ENVIRONMENT.md`; anything else is a bug to fix, not to suppress.
+Validation-layer runs must be clean apart from known loader messages from stale third-party Vulkan layers installed on
+the host; anything else is a bug to fix, not to suppress.
 
 ## 4b. Modernization toggles (settings path)
 

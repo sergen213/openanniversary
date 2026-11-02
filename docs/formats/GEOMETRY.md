@@ -495,7 +495,7 @@ the shipped data does not give us.
    units for trees 131/140/165/190/197/200, and the implied spans overlap between trees (tree 131 needs span 17,571 from
    S=16,923 while tree 140 needs 22,614 from S=17,178) - one array cannot hold both [V-data]. The model is wrong as stated.
 4. **Base vertex indices exist per material at draw time, measured from inside the game's own process.** A d3d9
-   passthrough shim standing in front of DXVK (`tools/dxhook`, setup in `docs/ENVIRONMENT.md`) logged every
+   passthrough shim standing in front of DXVK (`tools/dxhook`) logged every
    `DrawIndexedPrimitive` made while Lara stood in Croft Manor's entrance hall: 17,882,068 draw calls, 17,410,195 of
    them with at least 16 triangles, spread over ten distinct (vertex object, index object) pairs. Four of the ten ever
    use a non-zero base: the pair reached through stream offset 20 - vertex object `0x11fb92b8` with index objects
@@ -532,7 +532,7 @@ The two functions that do name that diagnostic are `FUN_0050aa40` and `FUN_0050b
 navigation bookkeeping - a linked list of bodies, fixed 32-entry node arrays, per-body radius scaling - and no strip walk
 [V]. Static hunting is capped there: cross-references in this image are base-relative, so `ExportXrefs.java` finds nothing
 for most targets and the call graph cannot be rebuilt by grep. What changed today is that the shipped game now boots into a
-real level on this machine under Wine plus DXVK (`docs/ENVIRONMENT.md`, "Running the original for observation"): the window
+real level on this machine under Wine plus DXVK: the window
 shows Lara standing in Croft Manor's entrance hall, screenshot verified [V-data]. That makes the decisive measurement a
 memory question rather than a disassembly one - locate the loaded level payloads and any vertex buffer the engine built from
 them, and diff those bytes against the archive's. If index words were rewritten on load, the diff shows it; if not, a base

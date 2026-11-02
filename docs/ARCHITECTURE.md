@@ -69,7 +69,7 @@ land in `src/render/vk` together with the vertex/index buffers that `src/formats
 
 ## Licensing boundary
 
-GPL-3.0-or-later (`LICENSE`). Code from the other local ports may be copied only after their owner adds an explicit
-license grant; see `docs/EXISTING_PROJECT_AUDIT.md` for which trees are GPL-compatible today and which grant nothing.
+Source-available, all rights reserved (`LICENSE`). No code is copied from other projects; external work informs naming
+and structure only.
 No proprietary bytes, decompilations or extracted game data enter git (`.gitignore` enforces it); reverse-engineering
 scratch work lives in the sibling `openanniversary-work/` directory.

@@ -33,17 +33,16 @@ subsystem names are the vocabulary our layers must speak:
 | `tr7/cdc/runtime/cdcMath/*`, `cdcScene/Source/{Entity,SceneCellGroup}` | scene/entity model for Milestone 5 semantics |
 | `tr7/game/{terrain.h}`, `tr7/game/pc/D3D/d3dterrain.cpp` | the Anniversary terrain vocabulary - 20-byte `TerrainRenderVertex`, octree nodes, per-material strips drawn with i16 index lists plus a base-vertex offset; used to name and cross-check what §9 of `docs/formats/GEOMETRY.md` measured in our own bytes (clone kept at `openanniversary-work/priorart/cdcEngine`) |
 
-License handling: theirs is GPL-3.0-only, ours GPL-3.0-or-later → compatible; any copied line must be attributed and stay
-GPL. To avoid a derivative-work claim on our own code, byte-level facts keep coming from our disassembly and our data
-measurements; external projects inform naming, structure and cross-version differences only (same rule as
-`docs/EXISTING_PROJECT_AUDIT.md`).
+License handling: theirs is GPL-3.0-only and this project is not GPL, so no code is copied. Byte-level facts come from
+our disassembly and our data measurements; external projects inform naming, structure and cross-version differences
+only.
 
 ## 3. Sibling local reference (already audited)
 
 [`openunderworld`](https://github.com/sergen213/openunderworld) documents DRM **v19** in `docs/formats/CONTAINERS.md` §4
 with the same 20-byte section header we measured for v14, and records the TR7-vs-TR8 relocation-unit difference
 (`count×8` vs bytes), citing cdcEngineTools. Its Legend/Anniversary part alignment (`0x9600000`) was independently
-confirmed here (`docs/formats/CONTAINERS.md` §3). Full audit: `docs/EXISTING_PROJECT_AUDIT.md`.
+confirmed here (`docs/formats/CONTAINERS.md` §3).
 
 ### 3.1 Underworld install byte inventory **[V-data]**
 
@@ -73,7 +72,7 @@ stays open (`docs/formats/DRM.md` §4).
 ## 5. `tra.exe` binary inventory **[V-data]**
 
 Reproduce: `objdump -p "…/Tomb Raider Anniversary/tra.exe"`; imports via
-`objdump -x tra.exe | awk '/DLL Name/{print $3}' | sort`. sha256 pinned in `docs/ENVIRONMENT.md`.
+`objdump -x tra.exe | awk '/DLL Name/{print $3}' | sort`.
 
 | Field | Value | Consequence here |
 | --- | --- | --- |
@@ -82,12 +81,12 @@ Reproduce: `objdump -p "…/Tomb Raider Anniversary/tra.exe"`; imports via
 | Entry point | RVA `0x238ce8` | — |
 | Linker version | 7.0 (MSVC .NET 2003-era) | period style: fixed structs, little C++ exception use in hot paths |
 | Characteristics | `0x10f`: relocs stripped, symbols/lines stripped | **no base relocations** → image must load at `0x400000`; our Ghidra project pins that base so address-keyed notes stay stable |
-| `DllCharacteristics` | `0x0000` | no ASLR/DEP/CFG; only relevant when instrumenting the original, which happens in a private Wine prefix (`docs/ENVIRONMENT.md`, "Running the original for observation") |
+| `DllCharacteristics` | `0x0000` | no ASLR/DEP/CFG; only relevant when instrumenting the original, which happens in a private Wine prefix |
 | Data directories | import `0x85f000`, resource `0x85b000`; exports/exception/bound-import/delay-load empty | no exported symbols to harvest; engine symbols come from disassembly [V-exe] |
 | Imported DLLs | `advapi32, binkw32, comctl32, gdi32, kernel32, ole32, oleaut32, shell32, user32, winmm` | **no d3d9/dinput/xaudio import** → Direct3D and input are resolved dynamically; Bink video via `binkw32.dll`; audio through `winmm` plus the engine's own ADPCM [S] §2 |
 | Timestamp | `1969-12-31 19:00:00` (zeroed build stamp) | unusable for dating the build |
 
-Corollary: the install also carries third-party `d3d9.dll`/`dxwrapper.dll` shims (`docs/ENVIRONMENT.md`). This project
+Corollary: the install also carries third-party `d3d9.dll`/`dxwrapper.dll` shims. This project
 reads none of them; our renderer talks Vulkan directly.
 
 ### 5.1 Chapter selection reaches real loader code, measured [V-exe]
@@ -122,16 +121,15 @@ and they mark the terrain/collision drawing code as switchable at runtime - usef
 * Local compilers accept the next mode experimentally: `g++ -std=c++26` and `clang++ -std=c++26` both compile a trivial
   TU on this host (GCC 16.2.1, Clang 23.1.3) [V-data]. The build stays at `-std=c++23`; move the floor only once C++26 is
   actually published.
-* Repo floor: `cmake_minimum_required(VERSION 3.28)`; host carries CMake 4.4.4 and Ninja 1.13.2 (full pinned list in
-  `docs/ENVIRONMENT.md`).
+* Repo floor: `cmake_minimum_required(VERSION 3.28)`; host carries CMake 4.4.4 and Ninja 1.13.2.
 
 ## 7. The shipped game's own settings tree **[V-data]**
 
-`wine-tra/user.reg` (the prefix built by `docs/ENVIRONMENT.md`'s run recipe) contains the key the shipped `tra.exe`
+`wine-tra/user.reg` (a private Wine prefix used to run the original) contains the key the shipped `tra.exe`
 writes and reads: `HKCU\Software\Crystal Dynamics\Tomb Raider: Anniversary`, with subsections `\Graphics` and
 `\Input`. Writing the keys and launching is what community notes say makes the game skip its start-time setup dialog
 (pcgamingwiki.com TR Anniversary page, [S]); under Wine the dialog appears regardless — settled negative 2026-10-22,
-see `docs/ENVIRONMENT.md`. What the tree contributes as fact:
+so the dialog is dismissed by hand. What the tree contributes as fact:
 
 * renderer feature vocabulary — `EnableShadows`, `EnableReflection`, `EnableDepthOfField`, `EnableWaterFX`,
   `EnableFullscreenEffects`, `EnableVSync`, `AntiAliasing`, `Contrast`, `Brightness`, `BestTextureFilter`,
