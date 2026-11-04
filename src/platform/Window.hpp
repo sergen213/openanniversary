@@ -2,6 +2,7 @@
 // Native window and input front end (SDL3). Deliberately small: the renderer needs a surface provider, the game
 // loop needs close/quit handling and key state; nothing else lives here.
 
+#include <cstdint>
 #include <string>
 
 struct SDL_Window;
@@ -35,8 +36,9 @@ public:
     bool create(const WindowConfig& config, std::string* error = nullptr);
     void destroy();
 
-    int widthPixels() const;   // drawable size, not the logical size under fractional scaling
-    int heightPixels() const;
+    // Drawable size in device pixels, never negative - the swapchain's extent type is uint32_t end to end.
+    std::uint32_t widthPixels() const;   // drawable size, not the logical size under fractional scaling
+    std::uint32_t heightPixels() const;
     SDL_Window* sdl() const { return window_; }
 
     // Pump once. Sets closed_ on a quit request or window close; Escape also closes so a stuck window is escapable.

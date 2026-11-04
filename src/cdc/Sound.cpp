@@ -1,5 +1,7 @@
 #include "cdc/Sound.hpp"
 
+#include <algorithm>
+
 namespace oa {
 namespace cdc {
 

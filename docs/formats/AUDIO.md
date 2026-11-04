@@ -141,6 +141,50 @@ no offset with a sane majority (only trivial two-block tails score high). So sta
 or different block layout between header and stream; the loader path for them is unresolved, while the in-unit type-6 path
 above is what `FUN_005eca10` receives.
 
+## 7.1 Standalone `.mul` stream records: the 0x800 head table plus a self-describing segment chain **[V-data, 2026-10-24]**
+
+The negative in §7's second paragraph does not describe the `pc-w\sndstrm\*.mul` family — it describes the four records whose +
+8 word is not a sample count. The standard framing of the standalone records, measured on every part of the install's sound
+tree (2026-10-24), is:
+
+* **Head region** (0x800 bytes, with parameters in the first dozen dwords and float volume/pan parameters at +0x34/+0x38 and
+  +0x68): `{u32 rate, i32 loopStartSamples, u32 samplesPerChannel, u32 channels(1|2)}`. On the named records the rate is
+  44,098-44,100 Hz (the engine derives 44,099/44,098 from its own clock maths — §3's 44,100 contract accepts them) and
+  `loopStartSamples` is −1 except on the one looping bed counted below.
+* **From offset 0x800 a chain of 32-byte segment records**, each `{u32 0, u32 dataBytes + 16, u32 0, u32 0, u32 dataBytes,
+  u32 0, u32 0, u32 0}` immediately followed by `dataBytes` of payload bytes = WHOLE §3 blocks: mono records carry 36-byte
+  blocks, stereo records carry per-channel block pairs `[L block][R block]` = 72 bytes. The chain is self-describing — the next
+  record sits at `record + dataBytes + 32` — and **the last segment's payload ends exactly at end of file**. No lump length,
+  no table between head and stream: §7's negative arithmetic described a shape this family does not have.
+* Measured census over all 1,034 named records (`oa-asset namescan` output, extract-and-gate probe 2026-10-24, throwaway
+  program outside the repository): **972 records pass the strict gate** — 696 mono / 276 stereo, 10,818,636 §3 blocks total,
+  399,773,552 payload bytes accounted — across record sizes 5,280..18,730,528 bytes and `samplesPerChannel` 2,304..16,330,752.
+  The gate refuses anything whose chain does not close at EOF with whole-block payloads; every refusal below is a different,
+  still-open variant, never a noise misread.
+* **61 records are the CINE voice-bag variant** (§7.1 open): their +0x810 dword reads `0x43494E45` (ASCII on disk "ENIC",
+  little-endian of the immediate `'CINE'`), sample `vo\directors\egypt\eg_06_01.mul` (size 1,596,304). The gate refuses them
+  by construction; their layout is understood only to that magic.
+* **1 record is a looping bed whose chain carries a zero-payload terminator**: `amb_cave_02_dry.mul` (9,728,736 bytes, head
+  `{44,098, 73,472, 8,480,256, 2}`). Its chain reaches a terminator record at 0x15120 (`{u32 2, u32 1744, u32 0, ..., u32 0}`
+  — `dataBytes` 0, so `+4` fails the strict `+16` bond). The 50 payload records total 82,656 payload bytes = 1,148 stereo
+  pairs = **73,472 samples per full pass — `loopStart` exactly**, so the header agrees with "repeat the body" semantics; but
+  86,144 bytes of image follow the terminator and those bytes frame neither as segment records nor as block-aligned payload.
+* Stereo decode is per-channel: each pair's L block decodes 64 samples, then its R block runs from R's own previous step
+  state, frames interleaved `L,R` to match the engine's stereo PCM contract (§3). Measured decode of
+  `Event_triggered\time_bend_03.mul` (`8F2641D7`, 38 segment records = 55,552 samples/channel at 44,100 Hz × 2 ch) wrote
+  222,208 PCM bytes (`oa-game --shippedSound --wavOut`), and the WAV parses with RMS 0.239 of full scale, zero-crossing rate
+  0.189 and peak 1.000 — loud music, not noise or silence. `music\...\TRAE_main_theme_2.mul` (`C8374111`) decodes the same way:
+  6,526 segment records = 9,592,064 samples per channel at 44,099 Hz × 2 ch, 38,368,256 PCM bytes.
+
+Code: `oa::cdc::frameMulStream()` gates the chain strictly (head channels 1|2, zero fields checked at the four real slots of
+each record, whole-block payloads, exact-EOF close) and `decodeMulStream()` emits whole passes trimmed to `samplesPerChannel`
+(`src/cdc/Sound.hpp/.cpp`), both measured on synthetic fixtures in `tests/test_sound.cpp` and on the install above through
+`oa-game --shippedSound=<path>` — which now detects the `.mul` framing before the DRM attempt and hands the decoded stream to
+the platform's audio device, writing true stereo to `--wavOut` and a mono downmix to the (mono-open) device.
+
+Reproduce: `./build/oa-game --gameDir="$G" --shippedSound='pc-w\sndstrm\Event_triggered\time_bend_03.mul' --wavOut=/tmp/b03.wav`,
+log line `shipped .mul: 38 segment records = 55552 samples per channel at 44100 Hz x 2 ch`.
+
 ## 8. Type-7 payloads carry the event keys that name the sound-stream banks - 1,034 records get paths **[V-data, V-exe, 2026-10-23]**
 
 The shipped creator chain (`FUN_00419a80`/`FUN_00419b00`/`FUN_00419b80` -> `FUN_004198d0`, AUDIO.md §2/§5) formats
@@ -157,7 +201,17 @@ matched=1,034, unresolved=295**. Resolved groups: `vo` 728, `event_triggered` 13
 junk runs (`x\`). That closes the naming half of §7's open question for the `.mul` family and cuts CONTAINERS.md §8's
 "~3,350 records with no name candidate" by this thousand; textures (`.raw`) and movies (`.bik`/`.sch`) keep their templates open.
 
-What the named banks actually hold stays open **[V-data negative]**: two event banks (`8F2641D7`, `E956B8E6`, 66,048 B) start
+What the named banks hold is no longer open: §7.1 (measured 2026-10-24) closes this negative — the heads quoted
+below are the `.mul` segment-chain framing, not "rate/loopStart/streamLen/flags". `8F2641D7` is the named record
+`Event_triggered\time_bend_03.mul` and `C8374111` the main theme `ui\TRAE_main_theme_2.mul`; both decode end to end
+(55,552 and 9,592,064 samples/channel respectively, × 2 ch, into the device via `--shippedSound`). `E956B8E6` is unnamed
+(namescan resolves no type-7 key to it) and lives at restricted specialisation masks — at mask `FFFFF802` the record is
+15,664 bytes with head `{44,100, −1, 23,040, 1}` and the hold-the-chain gate passes it whole (456 §3 blocks decoded, mono).
+§8's earlier "66,048 B" pairing with that hash was wrong — 66,048 is `8F2641D7`'s size. The paragraphs that stay are kept
+as the record of the earlier misframing.
+earlier misframing.
+
+Two event banks (`8F2641D7`, `E956B8E6`, 66,048 B) start
 `{u32 44100, u32 FFFFFFFF, u32 55552, u32 2}` and a music bank (`C8374111`) starts `{44099, 0, 9592064, 2}` - read as
 rate/loopStart/streamLen/flags, the stream is the LAST `streamLen` bytes (gap 10,496 before it). Those tail bytes are NOT §7's
 twelve-byte-plus-blocks shape: whole-number-of-36 block sanity passes on only **17.0%** from the tail start and 18.5-18.7% from

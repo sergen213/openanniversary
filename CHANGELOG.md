@@ -6,8 +6,20 @@ All notable changes to this project are documented here. The format follows Keep
 
 ## [Unreleased]
 
-*(Nothing tagged as of v0.1.0. Milestones 4–7 are still in progress; their open items and measured numbers live in
-`docs/ROADMAP.md` and `docs/TESTING.md`, not as unreleased changelog entries.)*
+### Added
+- Standalone `.mul` stream records decode end to end (`src/cdc/Sound.*`): `frameMulStream()` gates the 0x800-head-plus-
+  segment-chain framing measured over the whole named `pc-w\sndstrm\*.mul` family on 2026-10-24 — 972 of 1,034 records
+  pass the strict chain-closes-at-EOF gate (696 mono / 276 stereo, 10,818,636 §3 blocks) — and `decodeMulStream()` turns
+  mono blocks and stereo `[L][R]` block pairs into frame-interleaved PCM trimmed to `samplesPerChannel`.
+- `oa-game --shippedSound` now recognises a standalone `.mul` record before the DRM attempt and plays it through the
+  platform audio device (true stereo preserved in `--wavOut`, mono downmix to the mono-open device); measured on the
+  install: `Event_triggered\time_bend_03.mul` = 55,552 samples/channel × 2 ch, main theme `C8374111` = 9,592,064
+  samples/channel × 2 ch. `ci.sh` asserts the line. Format document: `docs/formats/AUDIO.md` §7.1; `docs/ROADMAP.md`
+  and the §8 negative half updated to close the "named banks undecodable" misframing. Open: 61 CINE-voice-bag records
+  (refused by magic) and one looping-bed record.
+- Four `MulStream` tests on synthetic fixtures built from the measured constants only (test suite now 92).
+
+*(Everything below this point is tagged `v0.1.0`.)*
 
 ## v0.1.0 — pre-alpha foundation (2026-10-23)
 

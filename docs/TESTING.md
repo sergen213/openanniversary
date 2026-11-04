@@ -71,6 +71,8 @@ G="<your Tomb Raider Anniversary install>"
 ./build/oa-asset "$G" texture --path 'pc-w\lara.drm' --section 9 --out /tmp/oascan/tex9.png   # tag 0x15 mask, RGBA
 ./build/oa-asset "$G" namescan --out /tmp/oascan/names.txt   # type-7 event keys -> sound banks (AUDIO.md §8)
 # stdout rows = 1,034 resolved records; stderr ends "matched=1034 unresolved=295"
+./build/oa-game --gameDir="$G" --frames=1 --shippedSound='pc-w\sndstrm\Event_triggered\time_bend_03.mul' --wavOut=/tmp/oascan/tb03.wav
+# log line + stereo WAV (AUDIO.md §7.1): "shipped .mul: 38 segment records = 55552 samples per channel at 44100 Hz x 2 ch"
 ```
 
 Measured here: **every one of the 4,304 records** was run through `drm` - the reproduction line and the resulting payload

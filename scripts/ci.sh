@@ -84,6 +84,15 @@ if [[ -n "${OA_GAME_DIR:-}" ]]; then
         echo "FAIL: oa-asset namescan matched fewer than a hundred sound-stream records (AUDIO.md §8 regression)" >&2
         exit 1
     fi
+    # Standalone .mul stream framing (AUDIO.md §7.1): play one shipped stereo record end to end and require
+    # the strict gate's own log line - a chain of segment records closing at EOF, trimmed decode, true sample count.
+    mul_log="$scratch/mul.log"
+    "$scratch/plain/oa-game" --gameDir="$OA_GAME_DIR" --frames=1 \
+        --shippedSound='pc-w\sndstrm\Event_triggered\time_bend_03.mul' >"$mul_log" 2>&1 || true
+    if ! grep -q 'shipped .mul: [0-9]* segment records = 55552 samples per channel at 44100 Hz x 2 ch' "$mul_log"; then
+        echo "FAIL: shipped .mul stream did not frame+decode per AUDIO.md §7.1 (time_bend_03 regression)" >&2
+        exit 1
+    fi
 fi
 echo "== 3/4 unit tests under ASan+UBSan =="
 # Display path is excluded here on purpose: vendor code (SDL/driver) leaks by design and would mask real findings.

@@ -20,6 +20,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <vector>
 
 namespace oa {
@@ -61,6 +62,7 @@ inline std::array<std::uint8_t, 36> makeAdpcmBlock(std::int16_t seed, std::uint8
     block[5] = fifth;
     return block;
 }
+
 // One standalone .mul stream record (AUDIO.md §7.1 [V-data, 2026-10-24], measured on 39/39 named pc-w\sndstrm\*.mul
 // records from the vo/event_triggered/stingers/music/ui groups, sizes 5 KiB..17.5 MiB): a head region
 // {u32 rate, i32 loopStartSamples(-1), u32 samplesPerChannel, u32 channels(1|2)} (f32 volume/pan parameters at

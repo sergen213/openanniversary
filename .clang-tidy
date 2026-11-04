@@ -1,0 +1,10 @@
+# Scope: real-defect checks only (the set whose findings we act on as bugs), not style. Run from the repo root with
+# build/compile_commands.json present (CMAKE_EXPORT_COMPILE_COMMANDS is ON): e.g.
+#   run-clang-tidy -p build $(ls src/**/*.cpp apps/**/*.cpp tools/**/*.cpp)
+# `*` globs are expanded by the shell; headers ride along via their TUs.
+Checks: 'bugprone-*,cert-*,clang-analyzer-*,misc-non-private-member-variables-in-classes,performance-*,-performance-enum-size,readability-function-cognitive-complexity'
+WarningsAsErrors: ''
+HeaderFilterRegex: '(src|apps|tools)/.*'
+CheckOptions:
+  - key: readability-function-cognitive-complexity.Threshold
+    value: 50

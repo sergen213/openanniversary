@@ -138,6 +138,7 @@ bool VkRenderer::createInstance(const RendererConfig& config, std::string* error
         return false;
     }
     std::vector<std::string> extensions;
+    extensions.reserve(sdlCount);   // one SDL string per count, exact capacity before the copy loop
     for (uint32_t i = 0; i < sdlCount; ++i) extensions.emplace_back(sdlExtensions[i]);
 
     uint32_t layerCount = 0;
@@ -183,6 +184,7 @@ bool VkRenderer::createInstance(const RendererConfig& config, std::string* error
     info.pApplicationInfo = &appInfo;
     info.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
     std::vector<const char*> extensionNames;
+    extensionNames.reserve(extensions.size());   // the pointer array is built once, at final size
     for (const std::string& name : extensions) extensionNames.push_back(name.c_str());
     info.ppEnabledExtensionNames = extensionNames.data();
     // The array must outlive the vkCreateInstance call below, so it lives at function scope, not inside the `if`.

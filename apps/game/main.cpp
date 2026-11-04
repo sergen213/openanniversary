@@ -907,10 +907,10 @@ int main(int argc, char** argv) {
                     return 2;
                 }
                 float heading = 0.0f;
-                unsigned turns = 0u, jumps = 0u, ticks = 0u;
+                unsigned turns = 0u, jumps = 0u, walkTicksRun = 0u;   // the scripted run's `ticks` stays visible on purpose
                 bool walkAlive = true;
                 const float walkStartX = walk.x, walkStartZ = walk.z;
-                for (const unsigned walkTicks = static_cast<unsigned>(walkSeconds) * 60u; ticks < walkTicks && walkAlive; ++ticks) {
+                for (const unsigned walkTicks = static_cast<unsigned>(walkSeconds) * 60u; walkTicksRun < walkTicks && walkAlive; ++walkTicksRun) {
                     const auto supports = [&](float h) {
                         return holdsUnder(walk, std::cos(h), std::sin(h));
                     };
@@ -932,7 +932,7 @@ int main(int argc, char** argv) {
                 OA_LOG(oa::LogLevel::Info, "app",
                        "avatar walk over '{}': {} tick(s) ran for {} second(s), {:.1f} units walked, {} turn(s), "
                        "{} jump(s); the body {} at ({:.1f}, {:.1f}, {:.1f}) ground {:.1f}; {}",
-                       meshPath, ticks, walkSeconds, walked, turns, jumps,
+                       meshPath, walkTicksRun, walkSeconds, walked, turns, jumps,
                        walkAlive ? "stood" : "left the level", walk.x, walk.y, walk.z, walk.groundY,
                        walkAlive && walked > 500.0f
                            ? "the surface held the body continuously across the level"
@@ -1343,12 +1343,12 @@ int main(int argc, char** argv) {
     }
     // --sound=true runs the engine's own decoder over the module's fixture blocks and hands the decoded tone to the
     // platform's audio device; --wavOut=<path> additionally writes the same PCM as a WAV so it can be compared byte-for-byte
-    // outside the process. The standalone archive records of family 1 keep an unresolved table (docs/formats/AUDIO.md §7's
-    // negative half), so the fixture proves pipeline and decoder; --shippedSound below plays real streams through the
-    // in-unit type-6 framing that §7 closes.
+    // outside the process. --shippedSound below plays real streams through the in-unit type-6 framing that §7 closes,
+    // and standalone .mul stream records (the pc-w\sndstrm\*.mul family docs/formats/AUDIO.md §7/§7.1 cracked on
+    // 2026-10-24) through its segment-record framing — all decoding through the same shipped engine block path.
     // One WAV writer serves the fixture tone and any shipped stream so both byte-check paths share code.
     const auto writeWav = [&](const std::string& path, const std::int16_t* samples, std::size_t count,
-                              unsigned rate) -> bool {
+                              unsigned rate, unsigned channels) -> bool {
         FILE* f = std::fopen(path.c_str(), "wb");
         if (!f) return false;
         const auto put32 = [&](unsigned v) {
@@ -1369,10 +1369,10 @@ int main(int argc, char** argv) {
         std::fwrite("WAVEfmt ", 1u, 8u, f);
         put32(16u);   // the fmt chunk body is exactly sixteen bytes below
         put16(1u);    // uncompressed integer samples
-        put16(1u);    // mono: the engine's blocks emit one sample stream
+        put16(channels);  // fixture/type-6 streams are mono; §7.1 .mul records carry their measured +0x0C channel count
         put32(rate);
-        put32(rate * 2u);
-        put16(2u);    // block align = channels * sample width = one sixteen-bit frame
+        put32(rate * 2u * channels);
+        put16(2u * channels);  // block align = channels * sample width
         put16(16u);   // bits per sample
         std::fwrite("data", 1u, 4u, f);
         put32(pcmBytes);
@@ -1396,7 +1396,7 @@ int main(int argc, char** argv) {
             return 2;
         }
         if (!config.str("wavOut").empty()) {
-            if (!writeWav(config.str("wavOut"), pcm.data(), pcm.size(), 44100u)) {
+            if (!writeWav(config.str("wavOut"), pcm.data(), pcm.size(), 44100u, 1u)) {
                 OA_LOG(oa::LogLevel::Error, "app", "--wavOut path '{}' unwritable", config.str("wavOut"));
                 return 2;
             }
@@ -1436,12 +1436,49 @@ int main(int argc, char** argv) {
             return 2;
         }
         const std::vector<std::byte> unitImage = archive.read(*record, &soundError);
+        bool played = false;
+        if (!unitImage.empty()) {
+            // §7.1 [V-data, 2026-10-24]: a standalone .mul stream record (pc-w\sndstrm\*.mul) is not a DRM unit; it frames
+            // as the segment-record chain and decodes through the same shipped §3 block path. Stereo records carry per-
+            // channel block pairs, de-interleaved to frames by decodeMulStream.
+            const std::span<const std::byte> image(unitImage.data(), unitImage.size());
+            oa::cdc::MulStream mul;
+            if (oa::cdc::frameMulStream(image, &mul)) {
+                std::vector<std::int16_t> pcm(static_cast<std::size_t>(mul.samplesPerChannel) * mul.channels);
+                oa::cdc::decodeMulStream(mul, image, pcm.data());
+                OA_LOG(oa::LogLevel::Info, "app", "shipped .mul: {} segment records = {} samples per channel at {} Hz x {} ch",
+                       mul.segments.size(), mul.samplesPerChannel, mul.rate, mul.channels);
+                if (!config.str("wavOut").empty()) {
+                    if (!writeWav(config.str("wavOut"), pcm.data(), pcm.size(), mul.rate, mul.channels)) {
+                        OA_LOG(oa::LogLevel::Error, "app", "--wavOut path '{}' unwritable", config.str("wavOut"));
+                        return 2;
+                    }
+                }
+                oa::platform::Audio audio;
+                std::string audioError;
+                if (!audio.create(static_cast<int>(mul.rate), &audioError)) {
+                    OA_LOG(oa::LogLevel::Warn, "app", "no audio device: {}", audioError);
+                } else if (mul.channels == 1u) {
+                    audio.push(pcm.data(), pcm.size());
+                    OA_LOG(oa::LogLevel::Info, "app", "shipped stream: {} samples handed to the device", pcm.size());
+                } else {
+                    // The shipped device opens mono (src/platform/Audio.cpp); with no mixer in this smoke path, play the
+                    // honest (L+R)/2 downmix of the decoded frames - the WAV keeps true stereo.
+                    std::vector<std::int16_t> mix(pcm.size() / 2u);
+                    for (std::size_t i = 0; i < mix.size(); ++i)
+                        mix[i] = static_cast<std::int16_t>((static_cast<int>(pcm[2u * i]) + static_cast<int>(pcm[2u * i + 1u])) / 2);
+                    audio.push(mix.data(), mix.size());
+                    OA_LOG(oa::LogLevel::Info, "app", "shipped stereo stream: {} frames decoded; mono downmix of {} samples handed to the device",
+                           pcm.size() / 2u, mix.size());
+                }
+                played = true;
+            }
+        }
         oa::cdc::DrmFile drm;
-        if (unitImage.empty() || !oa::cdc::DrmFile::parse(unitImage, &drm, &soundError)) {
-            OA_LOG(oa::LogLevel::Error, "app", "'{}' is not a DRM unit: {}", wanted, soundError);
+        if (!played && (unitImage.empty() || !oa::cdc::DrmFile::parse(unitImage, &drm, &soundError))) {
+            OA_LOG(oa::LogLevel::Error, "app", "'{}' is neither a .mul stream record nor a DRM unit: {}", wanted, soundError);
             return 2;
         }
-        bool played = false;
         for (const auto& section : drm.sections()) {
             if (!section.stored || section.type != 6u) continue;
             oa::cdc::AdpcmStream stream;
@@ -1451,7 +1488,7 @@ int main(int argc, char** argv) {
             OA_LOG(oa::LogLevel::Info, "app", "shipped sound: {} blocks = {} samples at rate {}", stream.blocks.size() / 36u,
                    pcm.size(), stream.rate);
             if (!config.str("wavOut").empty()) {
-                if (!writeWav(config.str("wavOut"), pcm.data(), pcm.size(), stream.rate)) {
+                if (!writeWav(config.str("wavOut"), pcm.data(), pcm.size(), stream.rate, 1u)) {
                     OA_LOG(oa::LogLevel::Error, "app", "--wavOut path '{}' unwritable", config.str("wavOut"));
                     return 2;
                 }
@@ -1474,8 +1511,8 @@ int main(int argc, char** argv) {
     }
     const int frameLimit = config.integer("frames", 0);
     int frames = 0;
-    int lastWidth = window.widthPixels();
-    int lastHeight = window.heightPixels();
+    int lastWidth = static_cast<int>(window.widthPixels());   // the renderer's resize API speaks signed ints
+    int lastHeight = static_cast<int>(window.heightPixels());
     const auto started = std::chrono::steady_clock::now();
     while (!window.shouldClose()) {
         window.pumpEvents();
@@ -1579,8 +1616,8 @@ int main(int argc, char** argv) {
             oa::render::applyMeshKeys(camera, panTarget, keys, camStep);
             renderer.setMeshCamera(camera);
         }
-        const int width = window.widthPixels();
-        const int height = window.heightPixels();
+        const int width = static_cast<int>(window.widthPixels());   // signed to match notifyResize, see lastWidth
+        const int height = static_cast<int>(window.heightPixels());   // signed to match notifyResize, see lastWidth
         if (width != lastWidth || height != lastHeight) {
             renderer.notifyResize(width, height);
             lastWidth = width;

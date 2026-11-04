@@ -49,16 +49,16 @@ void Window::destroy() {
     closed_ = false;
 }
 
-int Window::widthPixels() const {
+std::uint32_t Window::widthPixels() const {
     int w = 0, h = 0;
     SDL_GetWindowSizeInPixels(window_, &w, &h);
-    return w;
+    return static_cast<std::uint32_t>(w);   // SDL reports the device size; a window is never negative
 }
 
-int Window::heightPixels() const {
+std::uint32_t Window::heightPixels() const {
     int w = 0, h = 0;
     SDL_GetWindowSizeInPixels(window_, &w, &h);
-    return h;
+    return static_cast<std::uint32_t>(h);
 }
 
 void Window::pumpEvents() {
